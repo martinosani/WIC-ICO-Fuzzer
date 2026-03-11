@@ -1,28 +1,9 @@
 /*
- * harness_ini.h
+ * ini.h
  *
  * INI configuration loader.
  * Reads harness.ini from the same directory as the harness executable.
- * All values have compiled-in defaults (harness_config.h) so the INI
- * file is fully optional — harness runs correctly without it.
- *
- * INI format (Windows GetPrivateProfileInt/String):
- *
- *   [harness]
- *   max_width         = 16384
- *   max_height        = 16384
- *   max_frames        = 256
- *   max_buffer_mb     = 256
- *   iterations        = 5000
- *   conversion_path   = 1
- *   trace_enabled     = 1
- *   metadata_enum     = 1
- *   palette_path      = 1
- *   color_context_path= 1
- *   thumbnail_path    = 1
- *   decoder_info_path = 1
- *   mode              = FUZZ
- *
+ * All values have compiled-in defaults so the INI file is fully optional.
  */
 
 #ifndef HARNESS_INI_H
@@ -34,14 +15,14 @@
 #include "config.h"
 #include "policy.h"
 
- /* =========================================================================
-  * Runtime configuration — populated from INI + defaults
-  * ========================================================================= */
+/* =========================================================================
+ * Runtime configuration -- populated from INI + compiled-in defaults
+ * ========================================================================= */
 typedef struct _HARNESS_CONFIG {
-    /* Policy */
+    /* Policy limits (dimensions, buffer caps, metadata caps) */
     HARNESS_POLICY  policy;
 
-    /* Iteration count for standalone mode */
+    /* Iteration count for standalone mode (overridden by WinAFL) */
     UINT            iterations;
 
     /* Coverage path feature flags */
@@ -52,17 +33,15 @@ typedef struct _HARNESS_CONFIG {
     BOOL            colorContextPath;
     BOOL            thumbnailPath;
     BOOL            decoderInfoPath;
-    BOOL            transformPath;      /* IWICBitmapSourceTransform (Fix #7) */
-    BOOL            progressivePath;   /* IWICProgressiveLevelControl (Fix #8) */
-    BOOL            wicConvertPath;    /* WICConvertBitmapSource (Fix #11) */
+    BOOL            transformPath;      /* IWICBitmapSourceTransform */
+    BOOL            progressivePath;    /* IWICProgressiveLevelControl */
+    BOOL            wicConvertPath;     /* WICConvertBitmapSource */
 
-    /* Build mode override from INI (FUZZ / RESEARCH) */
+    /* Build mode (RESEARCH = TRUE enables SEH logging) */
     BOOL            researchMode;
 
-    /* Trace file path */
+    /* Resolved file paths */
     WCHAR           tracePath[HARNESS_TRACE_PATH_MAX];
-
-    /* INI file path (resolved at startup) */
     WCHAR           iniPath[MAX_PATH];
 
 } HARNESS_CONFIG;
@@ -71,35 +50,9 @@ typedef struct _HARNESS_CONFIG {
  * Function declarations
  * ========================================================================= */
 
- /*
-  * config_init_defaults
-  * Populate config with compiled-in defaults.
-  * Must be called before config_load_ini.
-  */
 void config_init_defaults(HARNESS_CONFIG* cfg);
-
-/*
- * config_load_ini
- * Load configuration from INI file.
- * Resolves INI path relative to the harness executable directory.
- * Values missing from INI retain their compiled-in defaults.
- * Returns TRUE if INI was found and parsed, FALSE if not found
- * (defaults are still valid — this is not an error).
- */
 BOOL config_load_ini(HARNESS_CONFIG* cfg);
-
-/*
- * config_resolve_trace_path
- * Resolve trace file path relative to executable directory.
- * Called after config_load_ini.
- */
 void config_resolve_trace_path(HARNESS_CONFIG* cfg);
-
-/*
- * config_print
- * Print active configuration to trace file and debug output.
- * Called once at startup for research documentation.
- */
 void config_print(const HARNESS_CONFIG* cfg, HANDLE hTraceFile);
 
 #endif /* HARNESS_INI_H */

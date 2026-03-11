@@ -2,7 +2,7 @@
 <Project>
   <ProjectOutputs>
     <ProjectOutput>
-      <FullPath>C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\VR\Windows Imaging Components (WIC)\WIC-ICO-Fuzzer\x64\Debug\WIC-ICO-Fuzzer.exe</FullPath>
+      <FullPath>C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\VR\Windows Imaging Components (WIC)\WIC-ICO-Fuzzer\src\x64\Debug\WIC-ICO-Fuzzer.exe</FullPath>
     </ProjectOutput>
   </ProjectOutputs>
   <ContentFiles />

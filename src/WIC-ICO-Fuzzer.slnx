@@ -3,5 +3,5 @@
     <Platform Name="x64" />
     <Platform Name="x86" />
   </Configurations>
-  <Project Path="WIC-ICO-Fuzzer.vcxproj" />
+  <Project Path="WIC-ICO-Fuzzer.vcxproj" Id="2504ac83-1aeb-4b39-813b-d4c0267f60b4" />
 </Solution>

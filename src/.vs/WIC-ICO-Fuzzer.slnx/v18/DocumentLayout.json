@@ -1,14 +1,21 @@
 {
   "Version": 1,
-  "WorkspaceRootPath": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\",
+  "WorkspaceRootPath": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\",
   "Documents": [
     {
-      "AbsoluteMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\main.c||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "AbsoluteMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\config.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|solutionrelative:config.h||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\main.c||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
       "RelativeMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|solutionrelative:main.c||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
     },
     {
-      "AbsoluteMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\harness.ini||{3B902123-F8A7-4915-9F01-361F908088D0}",
-      "RelativeMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|solutionrelative:harness.ini||{3B902123-F8A7-4915-9F01-361F908088D0}"
+      "AbsoluteMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\ini.c||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}",
+      "RelativeMoniker": "D:0:0:{2504AC83-1AEB-4B39-813B-D4C0267F60B4}|WIC-ICO-Fuzzer.vcxproj|solutionrelative:ini.c||{D0E1A5C6-B359-4E41-9B60-3365922C2A22}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\harness.ini||{3B902123-F8A7-4915-9F01-361F908088D0}"
     }
   ],
   "DocumentGroupContainers": [
@@ -23,28 +30,53 @@
             {
               "$type": "Document",
               "DocumentIndex": 0,
+              "Title": "config.h",
+              "DocumentMoniker": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\config.h",
+              "RelativeDocumentMoniker": "config.h",
+              "ToolTip": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\config.h",
+              "RelativeToolTip": "config.h",
+              "ViewState": "AgIAAI0AAAAAAAAAAAAAALkAAAAdAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000680|",
+              "WhenOpened": "2026-03-11T17:47:55.775Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "ini.c",
+              "DocumentMoniker": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\ini.c",
+              "RelativeDocumentMoniker": "ini.c",
+              "ToolTip": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\ini.c",
+              "RelativeToolTip": "ini.c",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA==",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000423|",
+              "WhenOpened": "2026-03-10T22:18:19.314Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
               "Title": "main.c",
-              "DocumentMoniker": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\main.c",
+              "DocumentMoniker": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\main.c",
               "RelativeDocumentMoniker": "main.c",
-              "ToolTip": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\main.c",
+              "ToolTip": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\src\\main.c",
               "RelativeToolTip": "main.c",
-              "ViewState": "AgIAAEYGAAAAAAAAAAAEwFIGAAATAAAAAAAAAA==",
+              "ViewState": "AgIAAAAAAAAAAAAAAAAAABsAAAADAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000423|",
               "WhenOpened": "2026-03-10T22:04:38.097Z",
               "EditorCaption": ""
             },
             {
               "$type": "Document",
-              "DocumentIndex": 1,
+              "DocumentIndex": 3,
               "Title": "harness.ini",
               "DocumentMoniker": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\harness.ini",
-              "RelativeDocumentMoniker": "harness.ini",
+              "RelativeDocumentMoniker": "..\\harness.ini",
               "ToolTip": "C:\\Users\\user\\Desktop\\Home\\VMs\\VMShared\\Windows-Internals\\VR\\Windows Imaging Components (WIC)\\WIC-ICO-Fuzzer\\harness.ini",
-              "RelativeToolTip": "harness.ini",
+              "RelativeToolTip": "..\\harness.ini",
               "ViewState": "AgIAACcAAAAAAAAAAAAAACkAAAAYAAAAAAAAAA==",
               "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.002768|",
-              "WhenOpened": "2026-03-10T16:51:44.297Z",
-              "EditorCaption": ""
+              "WhenOpened": "2026-03-10T16:51:44.297Z"
             }
           ]
         }

@@ -1,21 +1,8 @@
-﻿/*
- * harness_trace.c
+/*
+ * trace.c
  *
  * Trace and instrumentation module implementation.
  * Security-relevant data logging for vulnerability research.
- *
- * Fix history:
- *   v2: trace_write_direct — removed hidden 'extern g_trace' dependency.
- *       Now takes explicit HARNESS_TRACE_CTX* parameter. (Fix #1)
- *   v2: trace_iteration_end — added FlushFileBuffers so the last complete
- *       iteration entry is always on disk before a crash kills the process.
- *       This enables direct crash-input / trace-entry correlation. (Fix #12)
- *   v2: trace_metadata — added nestedCount parameter for recursive metadata
- *       enumeration depth tracking. (Fix #6)
- *   v2: Added trace_copy_pixels_partial, trace_transform, trace_progressive,
- *       trace_oob_frame. (Fixes #7, #8, #10, #16)
- *
- * 
  */
 
 #include <windows.h>
@@ -25,15 +12,10 @@
 #include "trace.h"
 #include "config.h"
 
- /* =========================================================================
-  * Internal helpers
-  * ========================================================================= */
+/* =========================================================================
+ * Internal helpers
+ * ========================================================================= */
 
-  /*
-   * trace_write
-   * Write a formatted string to the trace file.
-   * Silently does nothing if trace is disabled or file is invalid.
-   */
 static void trace_write(HARNESS_TRACE_CTX* ctx, const char* fmt, ...)
 {
     char    buf[1024];
@@ -50,10 +32,6 @@ static void trace_write(HARNESS_TRACE_CTX* ctx, const char* fmt, ...)
     WriteFile(ctx->hFile, buf, (DWORD)strlen(buf), &written, NULL);
 }
 
-/*
- * guid_to_string
- * Format a GUID as {xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx}
- */
 static void guid_to_string(const GUID* pGuid, char* buf, size_t bufLen)
 {
     if (!pGuid || !buf) return;
@@ -70,25 +48,25 @@ static void guid_to_string(const GUID* pGuid, char* buf, size_t bufLen)
  * trace_init
  * ========================================================================= */
 BOOL trace_init(
-    HARNESS_TRACE_CTX* ctx,
-    const WCHAR* path,
+    HARNESS_TRACE_CTX*  ctx,
+    const WCHAR*        path,
     BOOL                enabled)
 {
     if (!ctx) return FALSE;
 
     ZeroMemory(ctx, sizeof(*ctx));
-    ctx->hFile = INVALID_HANDLE_VALUE;
-    ctx->lastStage = STAGE_NONE;
+    ctx->hFile          = INVALID_HANDLE_VALUE;
+    ctx->lastStage      = STAGE_NONE;
     ctx->currentIteration = 0;
+    ctx->currentFrame   = HARNESS_NO_FRAME;
 
 #ifdef HARNESS_MODE_RESEARCH
-    /* Research mode: trace always active */
-    ctx->enabled = TRUE;
+    ctx->enabled = TRUE;    /* research mode: trace always active */
 #else
     ctx->enabled = enabled;
 #endif
 
-    if (!ctx->enabled) return TRUE; /* disabled — not an error */
+    if (!ctx->enabled) return TRUE;
 
     StringCchCopyW(ctx->path, HARNESS_TRACE_PATH_MAX, path);
 
@@ -108,8 +86,8 @@ BOOL trace_init(
 
     trace_write(ctx,
         "==========================================================\r\n"
-        " WIC ICO Fuzzing Harness — Trace File\r\n"
-        " Target: windowscodecs.dll \r\n"
+        " WIC ICO Fuzzing Harness -- Trace File\r\n"
+        " Target: windowscodecs.dll\r\n"
         " Build mode: %s\r\n"
         "==========================================================\r\n\r\n",
 #ifdef HARNESS_MODE_RESEARCH
@@ -140,13 +118,14 @@ void trace_close(HARNESS_TRACE_CTX* ctx)
  * trace_iteration_begin
  * ========================================================================= */
 void trace_iteration_begin(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     UINT                iteration,
-    const WCHAR* filePath)
+    const WCHAR*        filePath)
 {
     if (!ctx || !ctx->enabled) return;
     ctx->currentIteration = iteration;
-    ctx->lastStage = STAGE_NONE;
+    ctx->lastStage        = STAGE_NONE;
+    ctx->currentFrame     = HARNESS_NO_FRAME;
 
     trace_write(ctx,
         "----------------------------------------------------------\r\n"
@@ -159,19 +138,14 @@ void trace_iteration_begin(
 /* =========================================================================
  * trace_iteration_end
  *
- * v2 change: FlushFileBuffers is called after writing the summary line.
- *
- * Crash-input correlation: WinAFL saves the crashing input file, but does
- * not record which harness iteration produced the crash. By flushing after
- * every iteration, the last complete [ITER]/[FILE] block in the trace file
- * corresponds exactly to the crashing input. The researcher can match:
- *   - Last [FILE] line in trace → crashing input path
- *   - Last [STAGE] line in trace → stage where crash occurred
- *   - Last [ITER] line → iteration number
- * This replaces manual iteration-number matching. (Fix #12 — Imogen Walsh)
+ * FlushFileBuffers is called after writing the summary line.  This
+ * guarantees that the last complete [ITER]/[FILE] block before a process
+ * crash is always on disk, enabling direct crash-input correlation:
+ *   last [FILE] line  -> crashing input path
+ *   last [STAGE] line -> stage where the crash occurred
  * ========================================================================= */
 void trace_iteration_end(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     UINT                framesProcessed,
     UINT                framesSkipped)
 {
@@ -181,38 +155,46 @@ void trace_iteration_end(
         "[DONE] frames_processed=%u frames_skipped=%u\r\n",
         framesProcessed, framesSkipped);
 
-    /*
-     * Flush after every iteration.
-     * Cost: ~1 syscall per iteration. Acceptable at typical fuzz speeds
-     * (100-500 iter/sec). In high-throughput FUZZ_MODE without PageHeap,
-     * disable trace entirely rather than removing this flush.
-     */
     if (ctx->hFile != INVALID_HANDLE_VALUE)
         FlushFileBuffers(ctx->hFile);
 }
 
 /* =========================================================================
  * trace_stage
+ *
+ * Includes the current frame index in every [STAGE] line so crash triage
+ * does not require manual line counting.  Container-level operations
+ * (currentFrame == HARNESS_NO_FRAME) are printed as frame=--.
  * ========================================================================= */
 void trace_stage(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     TRIAGE_STAGE        stage,
     HRESULT             hr)
 {
     if (!ctx || !ctx->enabled) return;
     ctx->lastStage = stage;
-    trace_write(ctx,
-        "[STAGE] %-30s hr=0x%08X %s\r\n",
-        trace_stage_string(stage),
-        (unsigned)hr,
-        SUCCEEDED(hr) ? "OK" : "FAILED");
+
+    if (ctx->currentFrame == HARNESS_NO_FRAME) {
+        trace_write(ctx,
+            "[STAGE] frame=-- %-28s hr=0x%08X %s\r\n",
+            trace_stage_string(stage),
+            (unsigned)hr,
+            SUCCEEDED(hr) ? "OK" : "FAILED");
+    } else {
+        trace_write(ctx,
+            "[STAGE] frame=%-2u %-28s hr=0x%08X %s\r\n",
+            ctx->currentFrame,
+            trace_stage_string(stage),
+            (unsigned)hr,
+            SUCCEEDED(hr) ? "OK" : "FAILED");
+    }
 }
 
 /* =========================================================================
  * trace_decoder_capabilities
  * ========================================================================= */
 void trace_decoder_capabilities(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     DWORD               capabilities)
 {
@@ -221,20 +203,20 @@ void trace_decoder_capabilities(
         " [same_encoder=%d decode_all=%d decode_some=%d metadata=%d thumbnail=%d]\r\n",
         (unsigned)hr,
         (unsigned)capabilities,
-        (capabilities & WICBitmapDecoderCapabilitySameEncoder) ? 1 : 0,
-        (capabilities & WICBitmapDecoderCapabilityCanDecodeAllImages) ? 1 : 0,
+        (capabilities & WICBitmapDecoderCapabilitySameEncoder)         ? 1 : 0,
+        (capabilities & WICBitmapDecoderCapabilityCanDecodeAllImages)  ? 1 : 0,
         (capabilities & WICBitmapDecoderCapabilityCanDecodeSomeImages) ? 1 : 0,
-        (capabilities & WICBitmapDecoderCapabilityCanEnumerateMetadata) ? 1 : 0,
-        (capabilities & WICBitmapDecoderCapabilityCanDecodeThumbnail) ? 1 : 0);
+        (capabilities & WICBitmapDecoderCapabilityCanEnumerateMetadata)? 1 : 0,
+        (capabilities & WICBitmapDecoderCapabilityCanDecodeThumbnail)  ? 1 : 0);
 }
 
 /* =========================================================================
  * trace_container_format
  * ========================================================================= */
 void trace_container_format(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
-    const GUID* pContainerFormat)
+    const GUID*         pContainerFormat)
 {
     char guidStr[64] = "(null)";
     if (pContainerFormat) guid_to_string(pContainerFormat, guidStr, sizeof(guidStr));
@@ -247,7 +229,7 @@ void trace_container_format(
  * trace_frame_count
  * ========================================================================= */
 void trace_frame_count(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                frameCount,
     UINT                cappedCount)
@@ -259,20 +241,23 @@ void trace_frame_count(
 
 /* =========================================================================
  * trace_frame_begin
+ * Sets ctx->currentFrame so all subsequent trace_stage calls include the
+ * frame index until the next trace_iteration_begin resets it.
  * ========================================================================= */
 void trace_frame_begin(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     UINT                frameIndex)
 {
-    trace_write(ctx,
-        "  [FRAME] index=%u\r\n", frameIndex);
+    if (!ctx) return;
+    ctx->currentFrame = frameIndex;
+    trace_write(ctx, "  [FRAME] index=%u\r\n", frameIndex);
 }
 
 /* =========================================================================
  * trace_frame_size
  * ========================================================================= */
 void trace_frame_size(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                width,
     UINT                height)
@@ -286,9 +271,9 @@ void trace_frame_size(
  * trace_frame_pixel_format
  * ========================================================================= */
 void trace_frame_pixel_format(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
-    const GUID* pFmt,
+    const GUID*         pFmt,
     UINT                bpp)
 {
     char guidStr[64] = "(null)";
@@ -302,7 +287,7 @@ void trace_frame_pixel_format(
  * trace_frame_resolution
  * ========================================================================= */
 void trace_frame_resolution(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     double              dpiX,
     double              dpiY)
@@ -316,7 +301,7 @@ void trace_frame_resolution(
  * trace_palette
  * ========================================================================= */
 void trace_palette(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                colorCount,
     BOOL                hasAlpha,
@@ -331,7 +316,7 @@ void trace_palette(
  * trace_color_contexts
  * ========================================================================= */
 void trace_color_contexts(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                contextCount)
 {
@@ -342,19 +327,16 @@ void trace_color_contexts(
 
 /* =========================================================================
  * trace_metadata
- *
- * v2: added nestedCount for recursive enumeration depth tracking.
- * nestedCount is the number of VT_UNKNOWN propvariants that were
- * themselves IWICMetadataQueryReader objects (nested sub-readers).
- * Non-zero values indicate XMP/EXIF nesting inside PNG-in-ICO. (Fix #6)
+ * nestedCount: number of VT_UNKNOWN propvariants that were themselves
+ * IWICMetadataQueryReader objects (XMP/EXIF nesting inside PNG-in-ICO).
  * ========================================================================= */
 void trace_metadata(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     HRESULT             enumHr,
     UINT                itemCount,
     UINT                nestedCount,
-    const GUID* pContainerFmt)
+    const GUID*         pContainerFmt)
 {
     char guidStr[64] = "(null)";
     if (pContainerFmt) guid_to_string(pContainerFmt, guidStr, sizeof(guidStr));
@@ -367,7 +349,7 @@ void trace_metadata(
  * trace_thumbnail
  * ========================================================================= */
 void trace_thumbnail(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                width,
     UINT                height)
@@ -381,7 +363,7 @@ void trace_thumbnail(
  * trace_copy_pixels
  * ========================================================================= */
 void trace_copy_pixels(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                stride,
     UINT                bufferSize,
@@ -389,8 +371,7 @@ void trace_copy_pixels(
     BOOL                isConverted)
 {
     trace_write(ctx,
-        "  [CPX]   hr=0x%08X stride=%u buf_size=%u "
-        "policy=%s converted=%d\r\n",
+        "  [CPX]   hr=0x%08X stride=%u buf_size=%u policy=%s converted=%d\r\n",
         (unsigned)hr, stride, bufferSize,
         policy_result_string(policyResult),
         isConverted ? 1 : 0);
@@ -398,13 +379,9 @@ void trace_copy_pixels(
 
 /* =========================================================================
  * trace_copy_pixels_partial
- *
- * Partial-rect CopyPixels pass. The rect covers the top-left quadrant of
- * the frame. Documents stride/HRESULT for the partial decode path which
- * exercises different offset arithmetic inside the decoder. (Fix #10)
  * ========================================================================= */
 void trace_copy_pixels_partial(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                rectX,
     UINT                rectY,
@@ -420,12 +397,9 @@ void trace_copy_pixels_partial(
 
 /* =========================================================================
  * trace_transform
- *
- * IWICBitmapSourceTransform path. scaledW/scaledH are the requested
- * output dimensions (half of original). (Fix #7)
  * ========================================================================= */
 void trace_transform(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                scaledW,
     UINT                scaledH)
@@ -437,12 +411,9 @@ void trace_transform(
 
 /* =========================================================================
  * trace_progressive
- *
- * IWICProgressiveLevelControl path. levelCount is the number of
- * progressive levels available (0 if interface not supported). (Fix #8)
  * ========================================================================= */
 void trace_progressive(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     HRESULT             hr,
     UINT                levelCount)
 {
@@ -454,32 +425,43 @@ void trace_progressive(
 /* =========================================================================
  * trace_oob_frame
  *
- * Out-of-bounds frame index probe results. (Fix #16 — Haruto Mori)
- * hrAtCount  = result of GetFrame(frameCount)    — should be E_INVALIDARG
- * hrAt0xFFFF = result of GetFrame(0xFFFF)        — should be E_INVALIDARG
- * Unexpected success (S_OK) or non-INVALIDARG errors indicate boundary bugs.
+ * Extended to cover the two additional UINT32-range probes.
+ * Unexpected S_OK from any probe indicates a boundary validation bug.
+ *
+ * hrAtCount   = GetFrame(frameCount)    -- one past last valid
+ * hrAt0xFFFF  = GetFrame(0xFFFF)        -- ICO format max
+ * hrAtUintMax = GetFrame(0xFFFFFFFF)    -- full UINT32 range
+ * hrAtHigh    = GetFrame(0x80000000)    -- sign-bit probe
  * ========================================================================= */
 void trace_oob_frame(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     UINT                frameCount,
     HRESULT             hrAtCount,
-    HRESULT             hrAt0xFFFF)
+    HRESULT             hrAt0xFFFF,
+    HRESULT             hrAtUintMax,
+    HRESULT             hrAtHigh)
 {
     trace_write(ctx,
-        "[OOB]  frame_count=%u hr_at_count=0x%08X hr_at_0xFFFF=0x%08X"
-        " [count_ok=%d ffff_ok=%d]\r\n",
+        "[OOB]  frame_count=%u"
+        " hr_at_count=0x%08X hr_at_0xFFFF=0x%08X"
+        " hr_at_UINT_MAX=0x%08X hr_at_0x80000000=0x%08X"
+        " [count_ok=%d ffff_ok=%d umax_ok=%d high_ok=%d]\r\n",
         frameCount,
         (unsigned)hrAtCount,
         (unsigned)hrAt0xFFFF,
-        FAILED(hrAtCount) ? 1 : 0,   /* 1 = correctly rejected */
-        FAILED(hrAt0xFFFF) ? 1 : 0);
+        (unsigned)hrAtUintMax,
+        (unsigned)hrAtHigh,
+        FAILED(hrAtCount)   ? 1 : 0,
+        FAILED(hrAt0xFFFF)  ? 1 : 0,
+        FAILED(hrAtUintMax) ? 1 : 0,
+        FAILED(hrAtHigh)    ? 1 : 0);
 }
 
 /* =========================================================================
  * trace_policy_violation
  * ========================================================================= */
 void trace_policy_violation(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     POLICY_RESULT       result,
     UINT                width,
     UINT                height,
@@ -496,7 +478,7 @@ void trace_policy_violation(
  * trace_seh_exception
  * ========================================================================= */
 void trace_seh_exception(
-    HARNESS_TRACE_CTX* ctx,
+    HARNESS_TRACE_CTX*  ctx,
     DWORD               exceptionCode,
     TRIAGE_STAGE        lastStage)
 {
@@ -554,6 +536,7 @@ const char* trace_stage_string(TRIAGE_STAGE stage)
     case STAGE_TRANSFORM:           return "TRANSFORM";
     case STAGE_PROGRESSIVE:         return "PROGRESSIVE";
     case STAGE_FRAME_OOB:           return "FRAME_OOB";
+    case STAGE_WIC_CONVERT:         return "WIC_CONVERT";
     default:                        return "UNKNOWN";
     }
 }
