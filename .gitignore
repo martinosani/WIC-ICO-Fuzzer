@@ -9,3 +9,8 @@
 *.exe
 *.pdb
 *.dll
+*.db
+*.obj
+*.tlog
+*.ilk
+*.db

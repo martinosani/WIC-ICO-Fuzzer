@@ -1,1 +1,8 @@
-﻿
+﻿  ini.c
+  main.c
+  policy.c
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\VR\Windows Imaging Components (WIC)\WIC-ICO-Fuzzer\src\main.c(238,18): warning C4013: 'SHCreateStreamOnFileW' undefined; assuming extern returning int
+C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\VR\Windows Imaging Components (WIC)\WIC-ICO-Fuzzer\src\main.c(810,48): warning C4133: 'function': incompatible types - from 'IWICEnumMetadataItem **' to 'IEnumString **'
+  trace.c
+  Generating Code...
+  WIC-ICO-Fuzzer.vcxproj -> C:\Users\user\Desktop\Home\VMs\VMShared\Windows-Internals\VR\Windows Imaging Components (WIC)\WIC-ICO-Fuzzer\src\x64\Debug\WIC-ICO-Fuzzer.exe

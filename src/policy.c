@@ -2,7 +2,8 @@
  * policy.c
  *
  * Policy module implementation.
- * Dimension validation, stride/buffer arithmetic with overflow detection.
+ * Dimension validation, stride/buffer arithmetic with 64-bit overflow
+ * detection, COM-based pixel format resolution.
  */
 
 #include <windows.h>
@@ -10,15 +11,6 @@
 #include <stdio.h>
 #include "policy.h"
 #include "config.h"
-
-/*
- * Maximum plausible bpp for an unknown WIC pixel format.
- * WIC formats top out at 128 bpp (GUID_WICPixelFormat128bppRGBAFloat).
- * Using this as fallback ensures the pixel buffer is always large enough
- * for any format the decoder might materialise -- we over-allocate rather
- * than risk masking a real overflow with an under-sized buffer.
- */
-#define POLICY_BPP_FALLBACK_MAX  128U
 
 /* =========================================================================
  * policy_init
@@ -46,7 +38,7 @@ POLICY_RESULT policy_validate_dimensions(
     UINT                    width,
     UINT                    height)
 {
-    if (!policy) return POLICY_DIMENSION_EXCEED;
+    if (!policy) return POLICY_INVALID_ARG;
 
     if (width == 0 || height == 0)
         return POLICY_ZERO_DIMENSION;
@@ -62,16 +54,15 @@ POLICY_RESULT policy_validate_dimensions(
  *
  * Formula: stride = ((width * bpp + 31) / 32) * 4
  *
- * Overflow analysis (UINT32):
- *   width_max = 16384, bpp_max = 128
- *   16384 * 128 = 2,097,152  -- fits in UINT32
- *   + 31        = 2,097,183  -- fits in UINT32
- *   / 32        = 65,537     -- fits in UINT32
- *   * 4         = 262,148    -- fits in UINT32, < POLICY_MAX_STRIDE
+ * 64-bit intermediate analysis at maximum policy dimensions:
+ *   width  = 65535, bpp = 128 (POLICY_BPP_FALLBACK_MAX)
+ *   w64    = 65535 * 128    = 8,388,480      (fits in UINT64, < UINT32_MAX)
+ *   w64+31 = 8,388,511                       (fits, < UINT32_MAX)
+ *   /32    = 262,141                          (fits, < UINT32_MAX)
+ *   *4     = 1,048,564 bytes (~1 MB stride)  (fits, < POLICY_MAX_STRIDE)
  *
- * Despite the safe compile-time analysis, we check anyway: a malformed ICO
- * could supply a pixel format whose bpp exceeds 128, or future policy
- * constants might be raised.
+ * Despite the safe current analysis, all multiplications use UINT64
+ * intermediates so future policy increases cannot silently introduce bugs.
  * ========================================================================= */
 POLICY_RESULT policy_compute_stride(
     const HARNESS_POLICY*   policy,
@@ -79,37 +70,49 @@ POLICY_RESULT policy_compute_stride(
     UINT                    bpp,
     UINT*                   pStride)
 {
-    UINT widthBits;
-    UINT aligned;
-    UINT stride;
+    UINT64 w64;
+    UINT64 aligned64;
+    UINT64 stride64;
 
-    if (!policy || !pStride) return POLICY_STRIDE_OVERFLOW;
-    if (bpp == 0)            return POLICY_STRIDE_OVERFLOW;
+    if (!policy || !pStride) return POLICY_INVALID_ARG;
+    if (bpp == 0)             return POLICY_STRIDE_OVERFLOW;
 
-    /* width * bpp overflow? */
-    if (width > (0xFFFFFFFFU / bpp))
+    /* width * bpp -- both are UINT, product fits in UINT64 easily */
+    w64 = (UINT64)width * (UINT64)bpp;
+
+    /* Add 31 for alignment; no overflow possible (max w64 << UINT64_MAX) */
+    w64 += 31ULL;
+
+    /* Divide by 32 to get 32-pixel-aligned row width in pixels */
+    aligned64 = w64 / 32ULL;
+
+    /* Multiply by 4 to get byte stride */
+    stride64 = aligned64 * 4ULL;
+
+    /* Check that the result fits in UINT32 before the policy cap */
+    if (stride64 > 0xFFFFFFFFULL)
         return POLICY_STRIDE_OVERFLOW;
-    widthBits = width * bpp;
 
-    /* widthBits + 31 overflow? */
-    if (widthBits > (0xFFFFFFFFU - 31U))
-        return POLICY_STRIDE_OVERFLOW;
-    aligned = (widthBits + 31U) / 32U;
-
-    /* aligned * 4 overflow? */
-    if (aligned > (0xFFFFFFFFU / 4U))
-        return POLICY_STRIDE_OVERFLOW;
-    stride = aligned * 4U;
-
-    if (stride > policy->maxStride)
+    if ((UINT)stride64 > policy->maxStride)
         return POLICY_STRIDE_EXCEED;
 
-    *pStride = stride;
+    *pStride = (UINT)stride64;
     return POLICY_OK;
 }
 
 /* =========================================================================
  * policy_compute_buffer_size
+ *
+ * stride * height computed as UINT64 to prevent overflow before the
+ * comparison to maxBufferBytes.
+ *
+ * At maximum policy dimensions (65535 x 65535, 128 bpp):
+ *   stride = 1,048,564 bytes
+ *   buffer = 1,048,564 * 65,535 = ~68.7 GB (> UINT32_MAX, > maxBufferBytes)
+ *   -> POLICY_BUFFER_EXCEED
+ *
+ * For any input that the policy accepts (buffer <= maxBufferBytes = 256 MB),
+ * the result always fits in UINT32, so *pBufferSize is safe to use as UINT.
  * ========================================================================= */
 POLICY_RESULT policy_compute_buffer_size(
     const HARNESS_POLICY*   policy,
@@ -117,31 +120,37 @@ POLICY_RESULT policy_compute_buffer_size(
     UINT                    height,
     UINT*                   pBufferSize)
 {
-    UINT bufferSize;
+    UINT64 buf64;
 
-    if (!policy || !pBufferSize) return POLICY_BUFFER_OVERFLOW;
+    if (!policy || !pBufferSize) return POLICY_INVALID_ARG;
 
-    /* stride * height overflow? */
-    if (stride > 0U && height > (0xFFFFFFFFU / stride))
-        return POLICY_BUFFER_OVERFLOW;
-    bufferSize = stride * height;
+    /* 64-bit multiply: stride and height are both UINT32, product fits in UINT64 */
+    buf64 = (UINT64)stride * (UINT64)height;
 
-    if (bufferSize > policy->maxBufferBytes)
+    /*
+     * Compare against the 32-bit policy cap.  The cap itself (256 MB = 268435456)
+     * is well within UINT64 range.  Any buffer that exceeds the cap is rejected;
+     * any buffer within the cap fits in UINT32 by definition.
+     */
+    if (buf64 > (UINT64)policy->maxBufferBytes)
         return POLICY_BUFFER_EXCEED;
 
-    *pBufferSize = bufferSize;
+    *pBufferSize = (UINT)buf64;
     return POLICY_OK;
 }
 
 /* =========================================================================
  * policy_get_bpp_from_guid
  *
- * COM-only path: IWICImagingFactory -> IWICComponentInfo
- *             -> IWICPixelFormatInfo -> GetBitsPerPixel
+ * COM-only path:
+ *   IWICImagingFactory -> CreateComponentInfo -> IWICPixelFormatInfo
+ *   -> GetBitsPerPixel
  *
- * Returns 0 only when pFactory is NULL (caller must skip the frame).
- * Any other failure applies POLICY_BPP_FALLBACK_MAX (128) so we always
- * over-allocate -- never under-allocate -- on partial COM failure.
+ * Returns 0 only when pFactory is NULL (caller must skip the frame entirely).
+ * Any COM failure on an otherwise present factory applies
+ * POLICY_BPP_FALLBACK_MAX (128) to ensure we over-allocate rather than
+ * under-allocate -- under-allocation would mask real heap overflows from
+ * PageHeap.
  * ========================================================================= */
 UINT policy_get_bpp_from_guid(
     IWICImagingFactory*         pFactory,
@@ -152,7 +161,7 @@ UINT policy_get_bpp_from_guid(
     IWICPixelFormatInfo* pFmtInfo = NULL;
     UINT                 bpp      = 0U;
 
-    /* NULL factory: caller must skip -- no guessing allowed */
+    /* NULL factory: caller must skip -- no fallback is useful here */
     if (!pFactory || !pFmt) return 0U;
 
     hr = pFactory->lpVtbl->CreateComponentInfo(pFactory, pFmt, &pInfo);
@@ -193,6 +202,7 @@ const char* policy_result_string(POLICY_RESULT result)
     case POLICY_BUFFER_EXCEED:    return "POLICY_BUFFER_EXCEED";
     case POLICY_STRIDE_EXCEED:    return "POLICY_STRIDE_EXCEED";
     case POLICY_ZERO_DIMENSION:   return "POLICY_ZERO_DIMENSION";
+    case POLICY_INVALID_ARG:      return "POLICY_INVALID_ARG";
     default:                      return "POLICY_UNKNOWN";
     }
 }

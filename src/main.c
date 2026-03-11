@@ -202,11 +202,11 @@ void fuzz_target(const WCHAR* filePath)
 
     /* ===============================================================
      * STAGE 1: Create decoder from filename
-     * Forces all metadata parsing immediately (CacheOnLoad mode).
+     * Decoder creation; metadata cache mode selected at compile time (see HARNESS_DECODE_OPTIONS).
      * Exercises: file signature detection, ICONDIR initial read,
      *            codec selection, metadata cache population.
      *
-     * Campaign 2: build with /D HARNESS_CACHE_ON_DEMAND to switch to
+     * Campaign 2: build with /D HARNESS_CACHE_ON_LOAD to switch to
      * lazy metadata parsing -- a distinct internal code path used by
      * real Windows applications.
      * =============================================================== */
