@@ -80,7 +80,7 @@ Process startup
         ├── CoInitializeEx(COINIT_APARTMENTTHREADED)
         ├── CoCreateInstance(CLSID_WICImagingFactory)
         └── QI -> IWICImagingFactory2
-
+ 
   [WinAFL loop]
   └── fuzz_target(filePath)  ← called N times per process lifetime
         ├── CreateDecoderFromFilename
