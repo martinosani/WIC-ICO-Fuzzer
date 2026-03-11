@@ -15,7 +15,6 @@
 /* =========================================================================
  * Internal helpers
  * ========================================================================= */
-
 static void trace_write(HARNESS_TRACE_CTX* ctx, const char* fmt, ...)
 {
     char    buf[1024];
@@ -138,11 +137,8 @@ void trace_iteration_begin(
 /* =========================================================================
  * trace_iteration_end
  *
- * FlushFileBuffers is called after writing the summary line.  This
- * guarantees that the last complete [ITER]/[FILE] block before a process
- * crash is always on disk, enabling direct crash-input correlation:
- *   last [FILE] line  -> crashing input path
- *   last [STAGE] line -> stage where the crash occurred
+ * FlushFileBuffers guarantees the last complete [ITER]/[FILE] block is
+ * on disk before a crash, enabling direct crash-input correlation.
  * ========================================================================= */
 void trace_iteration_end(
     HARNESS_TRACE_CTX*  ctx,
@@ -162,9 +158,9 @@ void trace_iteration_end(
 /* =========================================================================
  * trace_stage
  *
- * Includes the current frame index in every [STAGE] line so crash triage
- * does not require manual line counting.  Container-level operations
- * (currentFrame == HARNESS_NO_FRAME) are printed as frame=--.
+ * Includes the current frame index in every [STAGE] line.
+ * Container-level operations (currentFrame == HARNESS_NO_FRAME) printed
+ * as frame=--.
  * ========================================================================= */
 void trace_stage(
     HARNESS_TRACE_CTX*  ctx,
@@ -241,8 +237,7 @@ void trace_frame_count(
 
 /* =========================================================================
  * trace_frame_begin
- * Sets ctx->currentFrame so all subsequent trace_stage calls include the
- * frame index until the next trace_iteration_begin resets it.
+ * Sets ctx->currentFrame so subsequent trace_stage calls include the index.
  * ========================================================================= */
 void trace_frame_begin(
     HARNESS_TRACE_CTX*  ctx,
@@ -251,6 +246,31 @@ void trace_frame_begin(
     if (!ctx) return;
     ctx->currentFrame = frameIndex;
     trace_write(ctx, "  [FRAME] index=%u\r\n", frameIndex);
+}
+
+/* =========================================================================
+ * trace_frame_budget
+ *
+ * Log the budget decision produced by policy_select_budget() for this frame.
+ * This line appears immediately after [FRAME] index= so triage can
+ * identify which decode paths were active for any given frame.
+ *
+ * BUDGET_METADATA_ONLY means CopyPixels was NOT called -- the crash happened
+ * during a cheap path.  BUDGET_FULL means CopyPixels was active.
+ * ========================================================================= */
+void trace_frame_budget(
+    HARNESS_TRACE_CTX*  ctx,
+    FRAME_BUDGET        budget,
+    UINT                width,
+    UINT                height,
+    UINT                estStride,
+    UINT                estBuffer)
+{
+    if (!ctx || !ctx->enabled) return;
+    trace_write(ctx,
+        "  [BUDGET] %s width=%u height=%u est_stride=%u est_buf=%u\r\n",
+        policy_budget_string(budget),
+        width, height, estStride, estBuffer);
 }
 
 /* =========================================================================
@@ -327,8 +347,8 @@ void trace_color_contexts(
 
 /* =========================================================================
  * trace_metadata
- * nestedCount: number of VT_UNKNOWN propvariants that were themselves
- * IWICMetadataQueryReader objects (XMP/EXIF nesting inside PNG-in-ICO).
+ * nestedCount: VT_UNKNOWN items that were themselves IWICMetadataQueryReader
+ * objects (XMP/EXIF nesting inside PNG-in-ICO chunks).
  * ========================================================================= */
 void trace_metadata(
     HARNESS_TRACE_CTX*  ctx,
@@ -424,14 +444,6 @@ void trace_progressive(
 
 /* =========================================================================
  * trace_oob_frame
- *
- * Extended to cover the two additional UINT32-range probes.
- * Unexpected S_OK from any probe indicates a boundary validation bug.
- *
- * hrAtCount   = GetFrame(frameCount)    -- one past last valid
- * hrAt0xFFFF  = GetFrame(0xFFFF)        -- ICO format max
- * hrAtUintMax = GetFrame(0xFFFFFFFF)    -- full UINT32 range
- * hrAtHigh    = GetFrame(0x80000000)    -- sign-bit probe
  * ========================================================================= */
 void trace_oob_frame(
     HARNESS_TRACE_CTX*  ctx,
@@ -459,6 +471,9 @@ void trace_oob_frame(
 
 /* =========================================================================
  * trace_policy_violation
+ *
+ * Called when policy_select_budget returns BUDGET_METADATA_ONLY.
+ * Logs the reason so triage knows which arithmetic check triggered.
  * ========================================================================= */
 void trace_policy_violation(
     HARNESS_TRACE_CTX*  ctx,

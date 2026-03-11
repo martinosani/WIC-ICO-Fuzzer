@@ -129,7 +129,8 @@ static void process_frame_transform(
     IWICBitmapFrameDecode*      pFrame,
     UINT                        width,
     UINT                        height,
-    const WICPixelFormatGUID*   pFmt);
+    const WICPixelFormatGUID*   pFmt,
+    FRAME_BUDGET                budget);
 
 static void process_frame_progressive(
     IWICBitmapFrameDecode*      pFrame,
@@ -140,7 +141,8 @@ static void process_frame_progressive(
 static void process_wic_convert(
     IWICBitmapFrameDecode*  pFrame,
     UINT                    width,
-    UINT                    height);
+    UINT                    height,
+    FRAME_BUDGET            budget);
 
 /* =========================================================================
  * fuzz_target
@@ -177,10 +179,21 @@ void fuzz_target(const WCHAR* filePath)
     DWORD       dwCapabilities  = 0;
 
     /* Per-iteration metadata item counter shared across all recursive
-     * process_metadata_reader calls.  Bounds the total enumeration work
-     * regardless of nesting depth, preventing throughput collapse on
-     * pathologically nested malformed ICO files. */
+     * process_metadata_reader calls.  Bounds total enumeration work
+     * regardless of nesting depth. */
     UINT        uTotalMetaItems = 0;
+
+    /*
+     * Per-frame decode budget.
+     * Replaces the old binary dimension skip with a graduated decision:
+     *   BUDGET_FULL          -- all paths including CopyPixels
+     *   BUDGET_METADATA_ONLY -- cheap COM paths only (no allocation)
+     *   BUDGET_SKIP          -- zero-dimension frame; nothing useful to call
+     * See policy_select_budget() in policy.c.
+     */
+    FRAME_BUDGET frameBudget    = BUDGET_SKIP;
+    UINT        estStride       = 0;
+    UINT        estBuffer       = 0;
 
     static UINT s_iteration = 0;
     s_iteration++;
@@ -401,17 +414,42 @@ void fuzz_target(const WCHAR* filePath)
 
             if (FAILED(hr)) { uSkipped++; SAFE_RELEASE(pFrame); continue; }
 
-            {
-                POLICY_RESULT pr = policy_validate_dimensions(
-                    &g_cfg.policy, width, height);
-                if (pr != POLICY_OK) {
-                    trace_policy_violation(&g_trace, pr, width, height, 0, 0);
-                    uSkipped++;
-                    SAFE_RELEASE(pFrame);
-                    continue;
-                }
+            /*
+             * Budget selection -- bug-hunting oriented policy.
+             *
+             * policy_select_budget() does NOT reject frames for being large.
+             * A frame with width=200000 still exercises GetPixelFormat,
+             * GetResolution, CopyPalette, GetColorContexts,
+             * GetMetadataQueryReader, GetThumbnail, IWICFormatConverter
+             * probe, WICConvertBitmapSource probe, and OOB probes.
+             * Only heap-allocation-backed paths are gated on the budget.
+             *
+             * BUDGET_SKIP is returned only for width==0 || height==0.
+             * BUDGET_METADATA_ONLY is returned when stride/buffer arithmetic
+             * overflows or exceeds the configured cap.
+             * BUDGET_FULL is returned when CopyPixels allocation is safe.
+             */
+            estStride  = 0;
+            estBuffer  = 0;
+            frameBudget = policy_select_budget(
+                &g_cfg.policy, width, height, 0, &estStride, &estBuffer);
+
+            trace_frame_budget(&g_trace, frameBudget, width, height,
+                               estStride, estBuffer);
+
+            if (frameBudget == BUDGET_SKIP) {
+                /* Zero dimensions: decoder cannot materialise a useful frame */
+                uSkipped++;
+                SAFE_RELEASE(pFrame);
+                continue;
             }
 
+            /*
+             * frameOk is set TRUE for ALL non-zero-dimension frames.
+             * This ensures every cheap COM path runs regardless of budget.
+             * Previously this flag was gated on a dimension check and caused
+             * 6+ code paths to be silently skipped for oversized frames.
+             */
             frameOk = TRUE;
 
             /* STAGE 13: GetPixelFormat */
@@ -479,28 +517,31 @@ void fuzz_target(const WCHAR* filePath)
              *   PNG-payload: full PNG decode (libpng + zlib inflate)
              * PageHeap catches heap overflows here.
              *
-             * CopyPixels is called via QI to IWICBitmapSource -- never
-             * via a raw pointer cast, which is undefined behaviour in C
-             * because vtable slot ordering for inherited interfaces is
-             * implementation-defined. */
-            process_frame_copy_pixels(
-                pFrame, uFrameIdx, width, height, &fmtGUID);
+             * Gated on BUDGET_FULL.  For BUDGET_METADATA_ONLY frames the
+             * allocation would exceed the harness cap; the decode is skipped
+             * but all cheap paths above have already run.
+             *
+             * Called via QI to IWICBitmapSource -- never via raw cast (UB). */
+            if (frameBudget == BUDGET_FULL) {
+                process_frame_copy_pixels(
+                    pFrame, uFrameIdx, width, height, &fmtGUID);
+            }
 
             /* STAGE 19b: CopyPixels -- partial rect (top-left quadrant)
-             * Exercises per-scanline offset arithmetic inside the decoder
-             * for a sub-rectangle request -- a distinct code path from the
-             * full-image copy with different stride/offset calculations. */
-            if (frameOk && width > 1 && height > 1) {
+             * Exercises per-scanline offset arithmetic for a sub-rectangle.
+             * Gated on BUDGET_FULL: requires a safe full allocation. */
+            if (frameBudget == BUDGET_FULL && frameOk && width > 1 && height > 1) {
                 process_frame_copy_pixels_partial(
                     pFrame, width, height, &fmtGUID);
             }
 
             /* STAGE 25: IWICBitmapSourceTransform (scaled decode)
-             * Exercises dimension scaling arithmetic inside the decoder --
-             * a known integer overflow surface.  We request half-size output.
-             * QI failure (not supported) is expected and silently skipped. */
+             * Exercises dimension scaling arithmetic -- integer overflow surface.
+             * Runs for ALL budgets (probe is cheap; internal CopyPixels is
+             * budget-gated inside the function via the same policy arithmetic).
+             * QI failure for BMP-payload frames is expected. */
             if (g_cfg.transformPath && frameOk) {
-                process_frame_transform(pFrame, width, height, &fmtGUID);
+                process_frame_transform(pFrame, width, height, &fmtGUID, frameBudget);
             }
 
             /* STAGE 26: IWICProgressiveLevelControl
@@ -514,10 +555,13 @@ void fuzz_target(const WCHAR* filePath)
 
             /* STAGE 20-21: Format conversion path
              * IWICFormatConverter -> BGRA32 -> CopyPixels.
-             * Exercises the format conversion pipeline which has its own
-             * internal buffer allocation and copy operations.
+             * Runs for ALL budgets: the CanConvert probe and Initialize call
+             * are cheap.  The CopyPixels inside this block is gated on the
+             * budget via policy_compute_buffer_size (already correct).
+             * Running this on BUDGET_METADATA_ONLY frames exercises the
+             * format validation path in the converter for unexpected/malformed
+             * pixel format GUIDs from the decoder -- high-value for bug hunting.
              *
-             * The CanConvert check is intentional for this path.
              * process_wic_convert (below) exercises Initialize without
              * CanConvert via WICConvertBitmapSource. */
             if (g_cfg.conversionPath && frameOk) {
@@ -658,9 +702,12 @@ void fuzz_target(const WCHAR* filePath)
              * Alternative conversion API with a distinct internal code path:
              * skips CanConvert, uses different internal allocation strategy,
              * wraps decode and convert in a single lazy-evaluated object.
-             * Identified from IDA string analysis at 0x18000A1940. */
+             * Runs for ALL budgets: the conversion call itself is cheap for
+             * BUDGET_METADATA_ONLY frames (the lazy object is created but
+             * CopyPixels on it is budget-gated inside the function).
+             * Exercises format validation on unexpected pixel format GUIDs. */
             if (g_cfg.wicConvertPath && frameOk) {
-                process_wic_convert(pFrame, width, height);
+                process_wic_convert(pFrame, width, height, frameBudget);
             }
 
             uProcessed++;
@@ -1176,15 +1223,20 @@ static void process_frame_copy_pixels_partial(
  * process_frame_transform
  *
  * IWICBitmapSourceTransform: scaled / rotated / flipped decode.
- * Exercises dimension scaling arithmetic inside the decoder -- a known
- * integer overflow surface.  We request half-size output (WIDTHx2 x HEIGHTx2).
+ * Exercises dimension scaling arithmetic inside the decoder -- integer
+ * overflow surface.  Runs for ALL budgets: QI + DoesSupportTransform are
+ * cheap.  The CopyPixels call is gated on BUDGET_FULL.
+ *
+ * Running DoesSupportTransform on an oversized frame exercises the
+ * decoder's capability introspection code for extreme dimensions.
  * QI failure (not supported) is expected for most BMP-payload frames.
  * ========================================================================= */
 static void process_frame_transform(
     IWICBitmapFrameDecode*      pFrame,
     UINT                        width,
     UINT                        height,
-    const WICPixelFormatGUID*   pFmt)
+    const WICPixelFormatGUID*   pFmt,
+    FRAME_BUDGET                budget)
 {
     HRESULT                     hr;
     IWICBitmapSourceTransform*  pTransform = NULL;
@@ -1204,9 +1256,13 @@ static void process_frame_transform(
     trace_stage(&g_trace, STAGE_TRANSFORM, hr);
     if (FAILED(hr) || !pTransform) return;
 
+    /* DoesSupportTransform: cheap capability probe, runs for all budgets */
     hr = pTransform->lpVtbl->DoesSupportTransform(
         pTransform, WICBitmapTransformRotate0, &bCanScale);
     if (FAILED(hr) || !bCanScale) goto transform_done;
+
+    /* CopyPixels gated on BUDGET_FULL -- allocation required */
+    if (budget != BUDGET_FULL) goto transform_done;
 
     if (pFmt) bpp = policy_get_bpp_from_guid(g_pFactory, pFmt);
     if (bpp == 0) goto transform_done;
@@ -1364,20 +1420,27 @@ progressive_done:
  * process_wic_convert
  *
  * WICConvertBitmapSource: single-call conversion API.
- * This function exercises a distinct internal code path from the manual
- * IWICFormatConverter sequence:
+ * Distinct internal path from the manual IWICFormatConverter sequence:
  *   - Does not perform a CanConvert check
  *   - Uses a different internal allocation strategy
  *   - Wraps decode and convert in a single lazy-evaluated object
  *
+ * Runs for ALL budgets: WICConvertBitmapSource itself is cheap (returns a
+ * lazy object).  CopyPixels on the result is gated on BUDGET_FULL so no
+ * harness-side allocation exceeds the configured cap.
+ *
+ * Calling WICConvertBitmapSource on a frame with an unusual/malformed pixel
+ * format GUID exercises the internal format validation path that is otherwise
+ * unreachable without this API.
+ *
  * The STAGE_WIC_CONVERT stage is logged before the call so that if
- * WICConvertBitmapSource itself crashes, the trace identifies this path
- * as the crash location (not the previous frame's last stage).
+ * WICConvertBitmapSource itself crashes, the trace identifies this path.
  * ========================================================================= */
 static void process_wic_convert(
     IWICBitmapFrameDecode*  pFrame,
     UINT                    width,
-    UINT                    height)
+    UINT                    height,
+    FRAME_BUDGET            budget)
 {
     HRESULT           hr;
     IWICBitmapSource* pConverted = NULL;
@@ -1393,8 +1456,8 @@ static void process_wic_convert(
         pFrame, &IID_IWICBitmapSource, (void**)&pFrameSrc);
     if (FAILED(hr) || !pFrameSrc) return;
 
-    /* Log the stage before the call so the trace identifies this path
-     * even if the call itself causes a crash in the target DLL. */
+    /* Log stage before call: if WICConvertBitmapSource crashes inside
+     * windowscodecs.dll, the trace entry is already on disk. */
     trace_stage(&g_trace, STAGE_WIC_CONVERT, S_OK);
 
     hr = WICConvertBitmapSource(
@@ -1405,6 +1468,9 @@ static void process_wic_convert(
     pFrameSrc->lpVtbl->Release(pFrameSrc);
 
     if (FAILED(hr) || !pConverted) return;
+
+    /* CopyPixels gated on BUDGET_FULL -- requires harness-side allocation */
+    if (budget != BUDGET_FULL) goto wic_convert_done;
 
     pr = policy_compute_stride(
         &g_cfg.policy, width, HARNESS_CONVERT_BPP * 8U, &stride);

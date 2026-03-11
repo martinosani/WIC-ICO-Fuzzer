@@ -12,17 +12,50 @@
  *   TinyInst coverage module: windowscodecs.dll
  *
  * Build variants:
- *   FUZZ_MODE    : /D HARNESS_MODE_FUZZ     -- WinAFL production run
- *   RESEARCH_MODE: /D HARNESS_MODE_RESEARCH  -- standalone debugging, SEH logging
+ *   /D HARNESS_MODE_FUZZ      -- WinAFL production run (default)
+ *   /D HARNESS_MODE_RESEARCH  -- standalone debugging, SEH logging
  *
- * Metadata cache mode:
- *   Default (no flag) : WICDecodeMetadataCacheOnDemand  -- Campaign 1
- *   /D HARNESS_CACHE_ON_LOAD : WICDecodeMetadataCacheOnLoad -- Campaign 2
+ * Metadata cache campaigns:
+ *   Default (no flag)         : WICDecodeMetadataCacheOnDemand  (Campaign 1)
+ *   /D HARNESS_CACHE_ON_LOAD  : WICDecodeMetadataCacheOnLoad    (Campaign 2)
  *
- *   CacheOnDemand is the default because it matches how real Windows
- *   applications (Explorer, preview handlers, thumbnail generators) open
- *   ICO files.  Bugs found in this mode are directly exploitable in
- *   real-world attack scenarios.  See README.md for the two-campaign strategy.
+ * -------------------------------------------------------------------------
+ * BUG-HUNTING POLICY PHILOSOPHY
+ * -------------------------------------------------------------------------
+ *
+ * The harness protects itself at the point of cost (memory allocation),
+ * NOT at input ingress.  Dimension checks are soft hints for budget
+ * selection -- they are never binary skip conditions.
+ *
+ * A frame with an extreme declared size (e.g. width=200000, height=1) still
+ * exercises every cheap COM path: GetPixelFormat, GetResolution, CopyPalette,
+ * GetColorContexts, GetMetadataQueryReader, GetThumbnail, IWICFormatConverter
+ * probe, WICConvertBitmapSource probe, IWICBitmapSourceTransform probe.
+ * Only heap-allocation-backed paths (CopyPixels full, CopyPixels partial,
+ * full transform/progressive decode) are gated on the FRAME_BUDGET.
+ *
+ * This design ensures windowscodecs.dll sees every input the fuzzer produces,
+ * including the malformed large-dimension inputs that historically trigger
+ * real heap overflows.  The harness never acts as a plausibility filter.
+ *
+ * The real arithmetic safety net: policy_select_budget() in policy.c uses
+ * 64-bit overflow-safe arithmetic (policy_compute_stride /
+ * policy_compute_buffer_size) to decide the budget.  At extreme dimensions
+ * (UINT32_MAX x UINT32_MAX, 128 bpp) the computed buffer is ~2^71 bytes --
+ * rejected immediately by the 64-bit buffer cap without any dimension check.
+ *
+ * -------------------------------------------------------------------------
+ * EXECUTION PROFILES
+ * -------------------------------------------------------------------------
+ *
+ * Three built-in profiles control the tradeoff between throughput and
+ * coverage depth.  Select via harness.ini:
+ *
+ *   policy_profile = fast      (max throughput, allocation-free paths only)
+ *   policy_profile = balanced  (all paths, budget-gated -- DEFAULT)
+ *   policy_profile = deep      (all paths, max allocation budget, low iter)
+ *
+ * Individual INI keys override profile presets.
  */
 
 #ifndef HARNESS_CONFIG_H
@@ -32,55 +65,38 @@
 
 /* =========================================================================
  * Build mode selection
- * Define exactly one via compiler flag.  Default: FUZZ.
  * ========================================================================= */
 #if !defined(HARNESS_MODE_FUZZ) && !defined(HARNESS_MODE_RESEARCH)
 #define HARNESS_MODE_FUZZ
 #endif
 
 /* =========================================================================
- * Policy limits -- compiled-in defaults.
+ * Soft dimension hints (bug-hunting oriented)
  *
- * These caps prevent resource-exhaustion OOM/timeout crashes in the harness
- * while allowing real heap overflows to reach the allocator and trigger.
+ * Used ONLY by policy_select_budget() to select BUDGET_FULL vs
+ * BUDGET_METADATA_ONLY.  Never used as a hard skip condition.
  *
- * Do NOT lower them aggressively.  Tight caps cause the harness to skip
- * inputs that are exactly the interesting mutated cases the fuzzer should
- * be reaching.  The policy rejects only inputs that are genuinely dangerous
- * for the harness itself (integer overflow, uncontrolled allocation) and
- * nothing else.
+ * Frames above these values → BUDGET_METADATA_ONLY (cheap paths run, no
+ * large CopyPixels allocation).
+ * Frames at or below  → BUDGET_FULL (all paths including CopyPixels).
  *
- * Width/height cap set to 65535: ICO ICONDIRENTRY.bWidth/bHeight are BYTE
- * fields, but the embedded PNG/BMP payload can declare any dimension.
- * Covering up to 65535 ensures we reach all dimensions a real or malformed
- * encoder could emit.
- *
- * Buffer cap (256 MB): at max dimensions (65535 x 65535) and 128 bpp the
- * theoretical buffer is ~68 GB.  The policy rejects those after overflow-safe
- * 64-bit arithmetic; 256 MB is generous enough to pass nearly all real and
- * interesting mutated inputs.
- *
- * maxStride is set equal to maxBufferBytes so the two limits are never
- * contradictory: a stride that individually passes cannot be rejected as
- * inconsistent by the buffer check.
+ * These exist because at 65535x65535 with 32bppBGRA the buffer is ~16 GB,
+ * which must be caught by the arithmetic cap anyway.  The soft hints allow
+ * the budget selector to avoid even attempting the 64-bit multiply for
+ * obviously extreme inputs, keeping the decision fast.
+ * ========================================================================= */
+#define POLICY_SOFT_MAX_WIDTH           65535U
+#define POLICY_SOFT_MAX_HEIGHT          65535U
+
+/* =========================================================================
+ * Balanced-profile policy limits (compiled-in defaults)
  * ========================================================================= */
 
-/* Maximum decoded frame dimensions (pixels) */
-#define POLICY_MAX_WIDTH                65535U
-#define POLICY_MAX_HEIGHT               65535U
+/* Hard allocation cap -- the true harness safety net (128 MB default) */
+#define POLICY_MAX_BUFFER_BYTES         (128U * 1024U * 1024U)
 
-/* Maximum per-frame pixel buffer (bytes) -- 256 MB */
-#define POLICY_MAX_BUFFER_BYTES         (256U * 1024U * 1024U)
-
-/*
- * Maximum row stride (bytes).
- *
- * Set equal to POLICY_MAX_BUFFER_BYTES so the two limits are consistent.
- * At max practical dimensions (65535 px wide, 128 bpp):
- *   stride = ((65535 * 128 + 31) / 32) * 4 = 1,048,564 bytes (~1 MB)
- * which is well within this cap.
- */
-#define POLICY_MAX_STRIDE               (256U * 1024U * 1024U)
+/* Row stride cap -- equal to buffer cap for arithmetic consistency */
+#define POLICY_MAX_STRIDE               (128U * 1024U * 1024U)
 
 /* Maximum frames processed per ICO file */
 #define POLICY_MAX_FRAMES               256U
@@ -94,57 +110,103 @@
 /* Maximum metadata items per single IWICEnumMetadataItem reader */
 #define POLICY_MAX_METADATA_ITEMS       4096U
 
-/*
- * Maximum total metadata items across ALL readers (including recursive
- * sub-readers) per single fuzz_target() invocation.
+/* Maximum total metadata items across ALL readers per fuzz_target() call */
+#define POLICY_MAX_TOTAL_METADATA_ITEMS 8192U
+
+/* =========================================================================
+ * Profile presets
  *
- * Guards against throughput collapse on pathologically nested malformed
- * metadata.  16384 is large enough to enumerate real-world metadata without
- * cutting off interesting inputs prematurely.
- */
-#define POLICY_MAX_TOTAL_METADATA_ITEMS 16384U
+ * fast:     High throughput.  No allocation-heavy paths.  No metadata,
+ *           transform, progressive, thumbnail.  Suitable for large corpora
+ *           and initial corpus coverage phases.
+ *
+ * balanced: All paths enabled, budget-gated allocation.  Optimal for
+ *           sustained WinAFL+TinyInst campaigns.  DEFAULT.
+ *
+ * deep:     Maximum coverage depth.  Large allocation budget, rich metadata
+ *           enumeration, all paths.  Pair with frequent process restart
+ *           (iterations=200) and PageHeap enabled on windowscodecs.dll.
+ * ========================================================================= */
+
+/* ---- fast ---- */
+#define PROFILE_FAST_MAX_BUFFER_BYTES         (32U  * 1024U * 1024U)
+#define PROFILE_FAST_MAX_STRIDE               (32U  * 1024U * 1024U)
+#define PROFILE_FAST_MAX_TOTAL_METADATA       2048U
+#define PROFILE_FAST_MAX_METADATA_ITEMS       512U
+#define PROFILE_FAST_ITERATIONS               10000U
+#define PROFILE_FAST_CONVERSION_PATH          0
+#define PROFILE_FAST_METADATA_ENUM            0
+#define PROFILE_FAST_PALETTE_PATH             1
+#define PROFILE_FAST_COLOR_CONTEXT_PATH       0
+#define PROFILE_FAST_THUMBNAIL_PATH           0
+#define PROFILE_FAST_DECODER_INFO_PATH        0
+#define PROFILE_FAST_TRANSFORM_PATH           0
+#define PROFILE_FAST_PROGRESSIVE_PATH         0
+#define PROFILE_FAST_WIC_CONVERT_PATH         0
+
+/* ---- balanced ---- */
+#define PROFILE_BALANCED_MAX_BUFFER_BYTES     (128U * 1024U * 1024U)
+#define PROFILE_BALANCED_MAX_STRIDE           (128U * 1024U * 1024U)
+#define PROFILE_BALANCED_MAX_TOTAL_METADATA   8192U
+#define PROFILE_BALANCED_MAX_METADATA_ITEMS   4096U
+#define PROFILE_BALANCED_ITERATIONS           5000U
+#define PROFILE_BALANCED_CONVERSION_PATH      1
+#define PROFILE_BALANCED_METADATA_ENUM        1
+#define PROFILE_BALANCED_PALETTE_PATH         1
+#define PROFILE_BALANCED_COLOR_CONTEXT_PATH   1
+#define PROFILE_BALANCED_THUMBNAIL_PATH       1
+#define PROFILE_BALANCED_DECODER_INFO_PATH    1
+#define PROFILE_BALANCED_TRANSFORM_PATH       1
+#define PROFILE_BALANCED_PROGRESSIVE_PATH     1
+#define PROFILE_BALANCED_WIC_CONVERT_PATH     1
+
+/* ---- deep ---- */
+#define PROFILE_DEEP_MAX_BUFFER_BYTES         (256U * 1024U * 1024U)
+#define PROFILE_DEEP_MAX_STRIDE               (256U * 1024U * 1024U)
+#define PROFILE_DEEP_MAX_TOTAL_METADATA       65536U
+#define PROFILE_DEEP_MAX_METADATA_ITEMS       16384U
+#define PROFILE_DEEP_ITERATIONS               200U
+#define PROFILE_DEEP_CONVERSION_PATH          1
+#define PROFILE_DEEP_METADATA_ENUM            1
+#define PROFILE_DEEP_PALETTE_PATH             1
+#define PROFILE_DEEP_COLOR_CONTEXT_PATH       1
+#define PROFILE_DEEP_THUMBNAIL_PATH           1
+#define PROFILE_DEEP_DECODER_INFO_PATH        1
+#define PROFILE_DEEP_TRANSFORM_PATH           1
+#define PROFILE_DEEP_PROGRESSIVE_PATH         1
+#define PROFILE_DEEP_WIC_CONVERT_PATH         1
 
 /* =========================================================================
- * Persistent mode iteration count
- * Overridden by WinAFL -fuzz_iterations at runtime.
+ * Compiled-in defaults (balanced profile)
  * ========================================================================= */
-#define HARNESS_ITERATIONS_DEFAULT      5000U
-
-/* =========================================================================
- * Coverage path feature flags -- compiled-in defaults.
- * All can be overridden at runtime via harness.ini.
- * ========================================================================= */
-#define HARNESS_CONVERSION_PATH_DEFAULT     1
+#define HARNESS_ITERATIONS_DEFAULT          PROFILE_BALANCED_ITERATIONS
+#define HARNESS_CONVERSION_PATH_DEFAULT     PROFILE_BALANCED_CONVERSION_PATH
 #define HARNESS_TRACE_ENABLED_DEFAULT       1
-#define HARNESS_METADATA_ENUM_DEFAULT       1
-#define HARNESS_PALETTE_PATH_DEFAULT        1
-#define HARNESS_COLOR_CONTEXT_PATH_DEFAULT  1
-#define HARNESS_THUMBNAIL_PATH_DEFAULT      1
-#define HARNESS_DECODER_INFO_PATH_DEFAULT   1
-#define HARNESS_TRANSFORM_PATH_DEFAULT      1
-#define HARNESS_PROGRESSIVE_PATH_DEFAULT    1
-#define HARNESS_WIC_CONVERT_PATH_DEFAULT    1
+#define HARNESS_METADATA_ENUM_DEFAULT       PROFILE_BALANCED_METADATA_ENUM
+#define HARNESS_PALETTE_PATH_DEFAULT        PROFILE_BALANCED_PALETTE_PATH
+#define HARNESS_COLOR_CONTEXT_PATH_DEFAULT  PROFILE_BALANCED_COLOR_CONTEXT_PATH
+#define HARNESS_THUMBNAIL_PATH_DEFAULT      PROFILE_BALANCED_THUMBNAIL_PATH
+#define HARNESS_DECODER_INFO_PATH_DEFAULT   PROFILE_BALANCED_DECODER_INFO_PATH
+#define HARNESS_TRANSFORM_PATH_DEFAULT      PROFILE_BALANCED_TRANSFORM_PATH
+#define HARNESS_PROGRESSIVE_PATH_DEFAULT    PROFILE_BALANCED_PROGRESSIVE_PATH
+#define HARNESS_WIC_CONVERT_PATH_DEFAULT    PROFILE_BALANCED_WIC_CONVERT_PATH
 
 /* =========================================================================
  * Trace configuration
  * ========================================================================= */
 #define HARNESS_TRACE_PATH_MAX      512U
 #define HARNESS_TRACE_FILE_DEFAULT  L"harness_trace.txt"
-
-/* Sentinel value stored in HARNESS_TRACE_CTX.currentFrame when the
- * current operation is at container level (not inside a frame loop). */
 #define HARNESS_NO_FRAME            0xFFFFFFFFU
 
 /* =========================================================================
- * INI configuration file
+ * INI configuration
  * ========================================================================= */
 #define HARNESS_INI_FILE_DEFAULT            L"harness.ini"
-
-/* Maximum length of a raw INI value string (characters, excluding NUL) */
 #define INI_VALUE_MAX_LEN                   64U
-
-/* Section name */
 #define INI_SECTION_HARNESS                 L"harness"
+
+/* Profile key */
+#define INI_KEY_POLICY_PROFILE              L"policy_profile"
 
 /* Policy keys */
 #define INI_KEY_MAX_WIDTH                   L"max_width"
@@ -157,7 +219,7 @@
 #define INI_KEY_MAX_METADATA_ITEMS          L"max_metadata_items"
 #define INI_KEY_MAX_TOTAL_METADATA_ITEMS    L"max_total_metadata_items"
 
-/* Harness behaviour keys */
+/* Behaviour keys */
 #define INI_KEY_ITERATIONS                  L"iterations"
 #define INI_KEY_CONVERSION_PATH             L"conversion_path"
 #define INI_KEY_TRACE_ENABLED               L"trace_enabled"
@@ -172,36 +234,17 @@
 #define INI_KEY_MODE                        L"mode"
 
 /* =========================================================================
- * COM / WIC target format
+ * COM / WIC
  * ========================================================================= */
-
-/* Output pixel format for IWICFormatConverter and WICConvertBitmapSource.
- * 32bppBGRA is universally supported by all built-in WIC codecs. */
 #define HARNESS_CONVERT_TARGET_FORMAT   GUID_WICPixelFormat32bppBGRA
-
-/* Bytes per pixel for BGRA32 -- used in stride computation */
 #define HARNESS_CONVERT_BPP             4U
 
-/*
- * Metadata cache mode for CreateDecoderFromFilename.
- *
- * Campaign 1 (default): WICDecodeMetadataCacheOnDemand
- *   Metadata is parsed lazily on first access via GetMetadataQueryReader.
- *   Matches how real Windows applications open ICO files.  Bugs found here
- *   are directly exploitable in real-world scenarios.
- *
- * Campaign 2: build with /D HARNESS_CACHE_ON_LOAD
- *   All metadata is parsed immediately on decoder creation, exercising the
- *   eager metadata path -- a distinct internal implementation.
- *   Keep the output directory separate; coverage bitmaps are not comparable.
- */
 #ifdef HARNESS_CACHE_ON_LOAD
 #define HARNESS_DECODE_OPTIONS  WICDecodeMetadataCacheOnLoad
 #else
 #define HARNESS_DECODE_OPTIONS  WICDecodeMetadataCacheOnDemand
 #endif
 
-/* WinAFL persistent mode target function name */
 #define WINAFL_TARGET_FUNCTION  fuzz_target
 
 /* =========================================================================

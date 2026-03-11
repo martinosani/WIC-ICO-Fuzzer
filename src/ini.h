@@ -4,18 +4,24 @@
  * INI configuration loader.
  *
  * Reads harness.ini from the same directory as the harness executable.
- * All values have compiled-in defaults from config.h so the INI file is
- * fully optional -- the harness runs correctly without it.
+ * All values have compiled-in defaults so the INI file is fully optional.
  *
- * Two entry points:
- *   ini_load_policy()   -- load only policy limits into a HARNESS_POLICY
- *   config_load_ini()   -- load full harness config into a HARNESS_CONFIG
+ * Profile system:
+ *   Setting policy_profile = fast|balanced|deep in harness.ini pre-populates
+ *   all feature flags and resource limits as a bundle.  Individual keys
+ *   appearing after the profile line override the profile preset.
+ *   This enables purpose-built execution profiles for different campaign
+ *   phases without manual per-key tuning.
+ *
+ * Profile definitions (compiled into config.h):
+ *   fast     -- max throughput, minimal paths, no allocation-heavy ops
+ *   balanced -- all paths, budget-gated allocation (DEFAULT)
+ *   deep     -- all paths, max budget, low iterations, frequent restart
  *
  * Integer parsing:
- *   All integer fields are parsed as signed INT via GetPrivateProfileIntW,
- *   then validated against explicit [min, max] ranges before assignment.
- *   Out-of-range or negative values are silently ignored; the compiled-in
- *   default (already set by policy_init / config_init_defaults) is kept.
+ *   All integer fields parsed as signed INT via GetPrivateProfileIntW,
+ *   validated against [min, max] before assignment.  Out-of-range or
+ *   negative values are silently ignored; defaults remain active.
  */
 
 #ifndef HARNESS_INI_H
@@ -28,13 +34,25 @@
 #include "policy.h"
 
 /* =========================================================================
+ * Execution profile enum
+ * ========================================================================= */
+typedef enum _HARNESS_PROFILE {
+    PROFILE_BALANCED = 0,   /* default */
+    PROFILE_FAST     = 1,
+    PROFILE_DEEP     = 2,
+} HARNESS_PROFILE;
+
+/* =========================================================================
  * Runtime configuration -- populated from INI + compiled-in defaults
  * ========================================================================= */
 typedef struct _HARNESS_CONFIG {
-    /* Policy limits (dimensions, buffer caps, metadata caps) */
+    /* Active execution profile (set from policy_profile= key) */
+    HARNESS_PROFILE profile;
+
+    /* Policy limits */
     HARNESS_POLICY  policy;
 
-    /* Iteration count for standalone mode (overridden by WinAFL) */
+    /* Iteration count for standalone mode */
     UINT            iterations;
 
     /* Coverage path feature flags */
@@ -45,11 +63,11 @@ typedef struct _HARNESS_CONFIG {
     BOOL            colorContextPath;
     BOOL            thumbnailPath;
     BOOL            decoderInfoPath;
-    BOOL            transformPath;      /* IWICBitmapSourceTransform */
-    BOOL            progressivePath;    /* IWICProgressiveLevelControl */
-    BOOL            wicConvertPath;     /* WICConvertBitmapSource */
+    BOOL            transformPath;
+    BOOL            progressivePath;
+    BOOL            wicConvertPath;
 
-    /* Build mode (RESEARCH = TRUE enables SEH logging) */
+    /* Build mode */
     BOOL            researchMode;
 
     /* Resolved file paths */
@@ -64,53 +82,45 @@ typedef struct _HARNESS_CONFIG {
 
 /*
  * ini_load_policy
- *
- * Load only the policy-limit keys from iniPath into *policy.
- * *policy must already be initialised (e.g. via policy_init()) before
- * calling this function; keys missing from the INI file keep their
- * existing value.
- *
- * Returns TRUE if the INI file was found and at least opened.
- * Returns FALSE if the file does not exist or iniPath is NULL.
+ * Load only policy-limit keys from iniPath into *policy.
+ * *policy must be initialised before calling.
  */
 BOOL ini_load_policy(const WCHAR* iniPath, HARNESS_POLICY* policy);
 
 /*
  * config_init_defaults
- *
- * Populate *cfg with compiled-in defaults.  Must be called before
- * config_load_ini() so INI values can override a fully-initialised base.
+ * Populate *cfg with compiled-in defaults (balanced profile).
+ * Must be called before config_load_ini().
  */
 void config_init_defaults(HARNESS_CONFIG* cfg);
 
 /*
+ * config_apply_profile
+ * Apply a named profile preset to *cfg.
+ * Called internally by config_load_ini() when policy_profile= is found.
+ * Can also be called directly before config_load_ini() to set a base profile.
+ */
+void config_apply_profile(HARNESS_CONFIG* cfg, HARNESS_PROFILE profile);
+
+/*
  * config_load_ini
- *
- * Locate harness.ini next to the running executable, parse all keys, and
- * update *cfg in-place.  Keys missing from the INI keep their default.
- *
- * Internally calls ini_load_policy() for the policy sub-set so that the
- * policy parsing logic is not duplicated.
+ * Locate harness.ini next to the running executable, parse all keys,
+ * update *cfg in-place.  Profile key is applied first; individual keys
+ * override.  Keys missing from INI keep their current value.
  *
  * Returns TRUE if the INI file was found and processed.
- * Returns FALSE if the file does not exist (defaults remain active).
  */
 BOOL config_load_ini(HARNESS_CONFIG* cfg);
 
 /*
  * config_resolve_trace_path
- *
- * Build the trace file path as <exedir>\harness_trace.txt and store it
- * in cfg->tracePath.  Falls back to a relative path if the executable
- * directory cannot be determined.
+ * Build the trace file path as <exedir>\harness_trace.txt.
  */
 void config_resolve_trace_path(HARNESS_CONFIG* cfg);
 
 /*
  * config_print
- *
- * Write a human-readable summary of *cfg to hTraceFile and to the
- * debugger via OutputDebugStringA.  Used at harness startup.
+ * Write a human-readable config summary to hTraceFile and OutputDebugString.
  */
 void config_print(const HARNESS_CONFIG* cfg, HANDLE hTraceFile);
 
