@@ -1,0 +1,11 @@
+*.vsidx
+*.vsidx
+*.db
+*.ipch
+*.vsidx
+*.opendb
+*.db-wal
+*.db
+*.exe
+*.pdb
+*.dll
