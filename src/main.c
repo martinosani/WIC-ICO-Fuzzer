@@ -37,11 +37,16 @@
 #include <shlobj.h>
 #include <stdio.h>
 #include <strsafe.h>
+#include <winternl.h>
+#include <psapi.h>
+#include <winver.h>
 
 #include "config.h"
 #include "policy.h"
 #include "trace.h"
 #include "ini.h"
+
+typedef LONG(WINAPI* PFN_RtlGetVersion)(PRTL_OSVERSIONINFOW);
 
 /* =========================================================================
  * SAFE_RELEASE
@@ -144,6 +149,19 @@ static void process_wic_convert(
     UINT                    height,
     FRAME_BUDGET            budget);
 
+static void collect_windows_version(
+    HARNESS_RUNTIME_INFO * info);
+
+static void collect_process_bitness(
+    HARNESS_RUNTIME_INFO * info);
+
+static void collect_windowscodecs_version(
+    HARNESS_RUNTIME_INFO * info);
+
+static void collect_runtime_info(
+    HARNESS_RUNTIME_INFO * info);
+
+
 /* =========================================================================
  * fuzz_target
  *
@@ -215,13 +233,22 @@ void fuzz_target(const WCHAR* filePath)
 
     /* ===============================================================
      * STAGE 1: Create decoder from filename
-     * Decoder creation; metadata cache mode selected at compile time (see HARNESS_DECODE_OPTIONS).
+     * Decoder creation; metadata cache mode selected at compile time
+     * (see HARNESS_DECODE_OPTIONS).
+     *
      * Exercises: file signature detection, ICONDIR initial read,
      *            codec selection, metadata cache population.
      *
-     * Campaign 2: build with /D HARNESS_CACHE_ON_LOAD to switch to
-     * lazy metadata parsing -- a distinct internal code path used by
-     * real Windows applications.
+     * Campaign 1 (default):
+     *   WICDecodeMetadataCacheOnDemand
+     *   Metadata is loaded lazily, only when metadata is queried.
+     *
+     * Campaign 2 (/D HARNESS_CACHE_ON_LOAD):
+     *   WICDecodeMetadataCacheOnLoad
+     *   Metadata is loaded eagerly during decoder creation / initialization.
+     *
+     * These modes should be treated as separate fuzzing experiments because
+     * they may exercise different internal parsing timing and decoder paths.
      * =============================================================== */
 
 #ifdef HARNESS_MODE_RESEARCH
@@ -1547,6 +1574,11 @@ static void harness_global_init(void)
             "[INIT]  IWICImagingFactory2 not available -- color context path disabled\r\n");
     }
 
+    HARNESS_RUNTIME_INFO rt;
+    collect_runtime_info(&rt);
+    rt.hasFactory2 = (g_pFactory2 != NULL);
+    trace_runtime_info(&g_trace, &rt);
+
     g_initialized = TRUE;
     trace_write_direct(&g_trace, "[INIT]  COM initialized, WIC factory ready\r\n");
 }
@@ -1564,6 +1596,217 @@ static void harness_global_cleanup(void)
     SAFE_RELEASE(g_pFactory);
     CoUninitialize();
     trace_close(&g_trace);
+}
+
+/* =========================================================================
+ * collect_windows_version
+ * ========================================================================= */
+static void collect_windows_version(HARNESS_RUNTIME_INFO* info)
+{
+    HMODULE hNtdll;
+    PFN_RtlGetVersion pRtlGetVersion;
+    RTL_OSVERSIONINFOW ver;
+
+    if (!info)
+        return;
+
+    ZeroMemory(&ver, sizeof(ver));
+    ver.dwOSVersionInfoSize = sizeof(ver);
+
+    hNtdll = GetModuleHandleW(L"ntdll.dll");
+    if (!hNtdll)
+        return;
+
+    pRtlGetVersion = (PFN_RtlGetVersion)GetProcAddress(hNtdll, "RtlGetVersion");
+    if (!pRtlGetVersion)
+        return;
+
+    if (pRtlGetVersion(&ver) == 0) {
+        info->windowsMajor = ver.dwMajorVersion;
+        info->windowsMinor = ver.dwMinorVersion;
+        info->windowsBuild = ver.dwBuildNumber;
+    }
+}
+
+/* =========================================================================
+ * collect_process_bitness
+ * ========================================================================= */
+static void collect_process_bitness(HARNESS_RUNTIME_INFO* info)
+{
+    typedef BOOL(WINAPI* PFN_IsWow64Process2)(HANDLE, USHORT*, USHORT*);
+    PFN_IsWow64Process2 pIsWow64Process2 = NULL;
+    HMODULE hKernel32 = NULL;
+    SYSTEM_INFO si;
+    BOOL wow64 = FALSE;
+
+    if (!info)
+        return;
+
+    info->processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+    info->nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+    info->isWow64 = FALSE;
+
+    hKernel32 = GetModuleHandleW(L"kernel32.dll");
+    if (hKernel32) {
+        pIsWow64Process2 =
+            (PFN_IsWow64Process2)GetProcAddress(hKernel32, "IsWow64Process2");
+    }
+
+    if (pIsWow64Process2) {
+        USHORT processMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        USHORT nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+
+        if (pIsWow64Process2(GetCurrentProcess(),
+            &processMachine,
+            &nativeMachine))
+        {
+            info->nativeMachine = (WORD)nativeMachine;
+
+            /*
+             * IsWow64Process2 semantics:
+             * - processMachine == IMAGE_FILE_MACHINE_UNKNOWN means the process
+             *   is NOT running under WOW/emulation.
+             * - In that case, the process architecture should be treated as
+             *   the native architecture.
+             */
+            if (processMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+                info->isWow64 = FALSE;
+                info->processMachine = (WORD)nativeMachine;
+            }
+            else {
+                info->isWow64 = TRUE;
+                info->processMachine = (WORD)processMachine;
+            }
+
+            return;
+        }
+    }
+
+    /*
+     * Fallback for older systems without IsWow64Process2.
+     */
+    if (IsWow64Process(GetCurrentProcess(), &wow64)) {
+        info->isWow64 = wow64;
+    }
+
+    ZeroMemory(&si, sizeof(si));
+    GetNativeSystemInfo(&si);
+
+    switch (si.wProcessorArchitecture) {
+    case PROCESSOR_ARCHITECTURE_AMD64:
+        info->nativeMachine = IMAGE_FILE_MACHINE_AMD64;
+        break;
+    case PROCESSOR_ARCHITECTURE_INTEL:
+        info->nativeMachine = IMAGE_FILE_MACHINE_I386;
+        break;
+    case PROCESSOR_ARCHITECTURE_ARM64:
+        info->nativeMachine = IMAGE_FILE_MACHINE_ARM64;
+        break;
+    case PROCESSOR_ARCHITECTURE_ARM:
+        info->nativeMachine = IMAGE_FILE_MACHINE_ARMNT;
+        break;
+    default:
+        info->nativeMachine = IMAGE_FILE_MACHINE_UNKNOWN;
+        break;
+    }
+
+    if (info->isWow64) {
+        /*
+         * Old WOW64 fallback: 32-bit process on 64-bit Windows.
+         * On classic Windows this is normally x86 on x64.
+         */
+        info->processMachine = IMAGE_FILE_MACHINE_I386;
+    }
+    else {
+        /*
+         * Native process: assume process arch matches native arch.
+         */
+        info->processMachine = info->nativeMachine;
+    }
+
+#if defined(_WIN64)
+    /*
+     * Strong compile-time fallback: if we built a 64-bit binary and runtime
+     * info is still ambiguous, prefer AMD64/ARM64 according to native arch.
+     */
+    if (info->processMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+        if (info->nativeMachine == IMAGE_FILE_MACHINE_ARM64)
+            info->processMachine = IMAGE_FILE_MACHINE_ARM64;
+        else
+            info->processMachine = IMAGE_FILE_MACHINE_AMD64;
+    }
+#else
+    /*
+     * Strong compile-time fallback for 32-bit builds.
+     */
+    if (info->processMachine == IMAGE_FILE_MACHINE_UNKNOWN) {
+        info->processMachine = IMAGE_FILE_MACHINE_I386;
+    }
+#endif
+}
+
+/* =========================================================================
+ * collect_windowscodecs_version
+ * ========================================================================= */
+static void collect_windowscodecs_version(HARNESS_RUNTIME_INFO* info)
+{
+    HMODULE hMod;
+    WCHAR modulePath[MAX_PATH];
+    DWORD handleUnused = 0;
+    DWORD verSize;
+    BYTE* verBuf = NULL;
+    VS_FIXEDFILEINFO* pFixed = NULL;
+    UINT fixedLen = 0;
+
+    if (!info)
+        return;
+
+    hMod = GetModuleHandleW(L"windowscodecs.dll");
+    if (!hMod)
+        return;
+
+    if (GetModuleFileNameW(hMod, modulePath, MAX_PATH) == 0)
+        return;
+
+    verSize = GetFileVersionInfoSizeW(modulePath, &handleUnused);
+    if (verSize == 0)
+        return;
+
+    verBuf = (BYTE*)HeapAlloc(GetProcessHeap(), HEAP_ZERO_MEMORY, verSize);
+    if (!verBuf)
+        return;
+
+    if (!GetFileVersionInfoW(modulePath, 0, verSize, verBuf))
+        goto done;
+
+    if (!VerQueryValueW(verBuf, L"\\", (LPVOID*)&pFixed, &fixedLen))
+        goto done;
+
+    if (!pFixed || fixedLen < sizeof(VS_FIXEDFILEINFO))
+        goto done;
+
+    info->wicVerMS = pFixed->dwFileVersionMS;
+    info->wicVerLS = pFixed->dwFileVersionLS;
+    info->hasWindowsCodecsVersion = TRUE;
+
+done:
+    if (verBuf)
+        HeapFree(GetProcessHeap(), 0, verBuf);
+}
+
+/* =========================================================================
+ * collect_runtime_info
+ * ========================================================================= */
+static void collect_runtime_info(HARNESS_RUNTIME_INFO* info)
+{
+    if (!info)
+        return;
+
+    ZeroMemory(info, sizeof(*info));
+
+    collect_windows_version(info);
+    collect_process_bitness(info);
+    collect_windowscodecs_version(info);
 }
 
 /* =========================================================================
@@ -1601,3 +1844,4 @@ int wmain(int argc, WCHAR* argv[])
     harness_global_cleanup();
     return 0;
 }
+

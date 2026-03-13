@@ -16,8 +16,8 @@
  *   /D HARNESS_MODE_RESEARCH  -- standalone debugging, SEH logging
  *
  * Metadata cache campaigns:
- *   Default (no flag)         : WICDecodeMetadataCacheOnDemand  (Campaign 1)
- *   /D HARNESS_CACHE_ON_LOAD  : WICDecodeMetadataCacheOnLoad    (Campaign 2)
+ *   Default (no flag)         : WICDecodeMetadataCacheOnDemand  (Campaign 1, lazy metadata loading)
+ *   /D HARNESS_CACHE_ON_LOAD  : WICDecodeMetadataCacheOnLoad    (Campaign 2, eager metadata loading)
  *
  * -------------------------------------------------------------------------
  * BUG-HUNTING POLICY PHILOSOPHY

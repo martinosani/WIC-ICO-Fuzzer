@@ -15,6 +15,27 @@
 /* =========================================================================
  * Internal helpers
  * ========================================================================= */
+static void trace_reset_hr_summary(HARNESS_TRACE_CTX* ctx)
+{
+    if (!ctx)
+        return;
+
+    ZeroMemory(ctx->hrClassCounts, sizeof(ctx->hrClassCounts));
+}
+
+static const char* machine_to_string(WORD machine)
+{
+    switch (machine) {
+    case IMAGE_FILE_MACHINE_I386:  return "x86";
+    case IMAGE_FILE_MACHINE_AMD64: return "x64";
+    case IMAGE_FILE_MACHINE_ARM64: return "arm64";
+    case IMAGE_FILE_MACHINE_ARMNT: return "arm";
+    case IMAGE_FILE_MACHINE_UNKNOWN:
+    default:
+        return "unknown";
+    }
+}
+
 static void trace_write(HARNESS_TRACE_CTX* ctx, const char* fmt, ...)
 {
     char    buf[1024];
@@ -41,6 +62,132 @@ static void guid_to_string(const GUID* pGuid, char* buf, size_t bufLen)
         pGuid->Data4[2], pGuid->Data4[3],
         pGuid->Data4[4], pGuid->Data4[5],
         pGuid->Data4[6], pGuid->Data4[7]);
+}
+
+static void trace_hr_summary(HARNESS_TRACE_CTX* ctx)
+{
+    if (!ctx || !ctx->enabled)
+        return;
+
+    trace_write(ctx,
+        "[HRSUMMARY] success=%u unsupported=%u no_data=%u parser_reject=%u resource_limit=%u unexpected=%u\r\n",
+        ctx->hrClassCounts[HRCLS_SUCCESS],
+        ctx->hrClassCounts[HRCLS_UNSUPPORTED_EXPECTED],
+        ctx->hrClassCounts[HRCLS_NO_DATA_EXPECTED],
+        ctx->hrClassCounts[HRCLS_PARSER_REJECT],
+        ctx->hrClassCounts[HRCLS_RESOURCE_LIMIT],
+        ctx->hrClassCounts[HRCLS_UNEXPECTED_FAILURE]);
+}
+
+
+static const char* trace_hresult_class_to_string(HRESULT_CLASSIFICATION cls)
+{
+    switch (cls) {
+    case HRCLS_SUCCESS:
+        return "SUCCESS";
+    case HRCLS_UNSUPPORTED_EXPECTED:
+        return "UNSUPPORTED_EXPECTED";
+    case HRCLS_NO_DATA_EXPECTED:
+        return "NO_DATA_EXPECTED";
+    case HRCLS_PARSER_REJECT:
+        return "PARSER_REJECT";
+    case HRCLS_RESOURCE_LIMIT:
+        return "RESOURCE_LIMIT";
+    case HRCLS_UNEXPECTED_FAILURE:
+    default:
+        return "UNEXPECTED_FAILURE";
+    }
+}
+
+
+static HRESULT_CLASSIFICATION trace_classify_hresult(TRIAGE_STAGE stage, HRESULT hr)
+{
+    if (SUCCEEDED(hr))
+        return HRCLS_SUCCESS;
+
+    /*
+     * Generic COM / Win32 resource failures.
+     */
+    if (hr == E_OUTOFMEMORY ||
+        hr == HRESULT_FROM_WIN32(ERROR_NOT_ENOUGH_MEMORY) ||
+        hr == HRESULT_FROM_WIN32(ERROR_OUTOFMEMORY))
+    {
+        return HRCLS_RESOURCE_LIMIT;
+    }
+
+    /*
+     * Unsupported interface / unsupported operation.
+     */
+    if (hr == E_NOINTERFACE ||
+        hr == WINCODEC_ERR_UNSUPPORTEDOPERATION)
+    {
+        return HRCLS_UNSUPPORTED_EXPECTED;
+    }
+
+    /*
+     * Stage-specific expected "no data" cases.
+     */
+    switch (stage) {
+    case STAGE_CONTAINER_METADATA:
+    case STAGE_FRAME_METADATA:
+    case STAGE_COLOR_CONTEXTS:
+    case STAGE_PREVIEW:
+    case STAGE_THUMBNAIL_CONTAINER:
+    case STAGE_FRAME_COLOR_CONTEXTS:
+    case STAGE_FRAME_THUMBNAIL:
+        if (hr == WINCODEC_ERR_PROPERTYNOTFOUND ||
+            hr == WINCODEC_ERR_CODECNOTHUMBNAIL ||
+            hr == WINCODEC_ERR_PALETTEUNAVAILABLE ||
+            hr == WINCODEC_ERR_UNSUPPORTEDOPERATION)
+        {
+            return HRCLS_NO_DATA_EXPECTED;
+        }
+        break;
+
+    case STAGE_TRANSFORM:
+        if (hr == E_NOINTERFACE ||
+            hr == WINCODEC_ERR_UNSUPPORTEDOPERATION)
+        {
+            return HRCLS_UNSUPPORTED_EXPECTED;
+        }
+        break;
+
+    default:
+        break;
+    }
+
+    /*
+     * Parser/content rejection cases.
+     * These are interesting in malformed corpus analysis.
+     */
+    if (hr == WINCODEC_ERR_BADHEADER ||
+        hr == WINCODEC_ERR_BADIMAGE ||
+        hr == WINCODEC_ERR_BADSTREAMDATA ||
+        hr == WINCODEC_ERR_STREAMREAD ||
+        hr == WINCODEC_ERR_STREAMWRITE ||
+        hr == WINCODEC_ERR_STREAMNOTAVAILABLE ||
+        hr == WINCODEC_ERR_COMPONENTNOTFOUND ||
+        hr == WINCODEC_ERR_IMAGESIZEOUTOFRANGE ||
+        hr == WINCODEC_ERR_TOOMUCHMETADATA ||
+        hr == WINCODEC_ERR_INVALIDQUERYREQUEST ||
+        hr == WINCODEC_ERR_UNEXPECTEDSIZE ||
+        hr == WINCODEC_ERR_INVALIDJPEGSCANINDEX)
+    {
+        return HRCLS_PARSER_REJECT;
+    }
+
+    /*
+     * Invalid-parameter style failures: often useful as parser/control-flow signal.
+     * Keep them as unexpected by default unless you later want a dedicated class.
+     */
+    if (hr == E_INVALIDARG ||
+        hr == HRESULT_FROM_WIN32(ERROR_INVALID_DATA) ||
+        hr == HRESULT_FROM_WIN32(ERROR_ARITHMETIC_OVERFLOW))
+    {
+        return HRCLS_UNEXPECTED_FAILURE;
+    }
+
+    return HRCLS_UNEXPECTED_FAILURE;
 }
 
 /* =========================================================================
@@ -126,6 +273,8 @@ void trace_iteration_begin(
     ctx->lastStage        = STAGE_NONE;
     ctx->currentFrame     = HARNESS_NO_FRAME;
 
+    trace_reset_hr_summary(ctx);
+
     trace_write(ctx,
         "----------------------------------------------------------\r\n"
         "[ITER] %u\r\n"
@@ -147,6 +296,8 @@ void trace_iteration_end(
 {
     if (!ctx || !ctx->enabled) return;
 
+   trace_hr_summary(ctx);
+
     trace_write(ctx,
         "[DONE] frames_processed=%u frames_skipped=%u\r\n",
         framesProcessed, framesSkipped);
@@ -163,28 +314,62 @@ void trace_iteration_end(
  * as frame=--.
  * ========================================================================= */
 void trace_stage(
-    HARNESS_TRACE_CTX*  ctx,
+    HARNESS_TRACE_CTX* ctx,
     TRIAGE_STAGE        stage,
     HRESULT             hr)
 {
-    if (!ctx || !ctx->enabled) return;
+    HRESULT_CLASSIFICATION cls;
+    const char* classStr;
+
+    if (!ctx || !ctx->enabled)
+        return;
+
     ctx->lastStage = stage;
 
+    cls = trace_classify_hresult(stage, hr);
+    classStr = trace_hresult_class_to_string(cls);
+
+    if ((unsigned)cls < HRCLS_COUNT) {
+        ctx->hrClassCounts[cls]++;
+    }
+
     if (ctx->currentFrame == HARNESS_NO_FRAME) {
-        trace_write(ctx,
-            "[STAGE] frame=-- %-28s hr=0x%08X %s\r\n",
-            trace_stage_string(stage),
-            (unsigned)hr,
-            SUCCEEDED(hr) ? "OK" : "FAILED");
-    } else {
-        trace_write(ctx,
-            "[STAGE] frame=%-2u %-28s hr=0x%08X %s\r\n",
-            ctx->currentFrame,
-            trace_stage_string(stage),
-            (unsigned)hr,
-            SUCCEEDED(hr) ? "OK" : "FAILED");
+        if (SUCCEEDED(hr)) {
+            trace_write(ctx,
+                "[STAGE] frame=-- %-28s hr=0x%08X OK\r\n",
+                trace_stage_string(stage),
+                (unsigned)hr);
+        }
+        else {
+            trace_write(ctx,
+                "[STAGE] frame=-- %-28s hr=0x%08X FAILED %s\r\n",
+                trace_stage_string(stage),
+                (unsigned)hr,
+                classStr);
+        }
+    }
+    else {
+        if (SUCCEEDED(hr)) {
+            trace_write(ctx,
+                "[STAGE] frame=%-2u %-28s hr=0x%08X OK\r\n",
+                ctx->currentFrame,
+                trace_stage_string(stage),
+                (unsigned)hr);
+        }
+        else {
+            trace_write(ctx,
+                "[STAGE] frame=%-2u %-28s hr=0x%08X FAILED %s\r\n",
+                ctx->currentFrame,
+                trace_stage_string(stage),
+                (unsigned)hr,
+                classStr);
+        }
     }
 }
+
+
+
+
 
 /* =========================================================================
  * trace_decoder_capabilities
@@ -555,3 +740,43 @@ const char* trace_stage_string(TRIAGE_STAGE stage)
     default:                        return "UNKNOWN";
     }
 }
+
+/* =========================================================================
+ * trace_runtime_info
+ * ========================================================================= */
+void trace_runtime_info(HARNESS_TRACE_CTX* ctx,
+    const HARNESS_RUNTIME_INFO* info)
+{
+    if (!ctx || !ctx->enabled || !info)
+        return;
+
+    trace_write(ctx,
+        "[ENV]  windows_version=%lu.%lu build=%lu\r\n",
+        (unsigned long)info->windowsMajor,
+        (unsigned long)info->windowsMinor,
+        (unsigned long)info->windowsBuild);
+
+    trace_write(ctx,
+        "[ENV]  process_machine=%s native_machine=%s wow64=%d\r\n",
+        machine_to_string(info->processMachine),
+        machine_to_string(info->nativeMachine),
+        info->isWow64 ? 1 : 0);
+
+    trace_write(ctx,
+        "[ENV]  IWICImagingFactory2=%s\r\n",
+        info->hasFactory2 ? "available" : "not_available");
+
+    if (info->hasWindowsCodecsVersion) {
+        trace_write(ctx,
+            "[ENV]  windowscodecs.dll version=%u.%u.%u.%u\r\n",
+            HIWORD(info->wicVerMS),
+            LOWORD(info->wicVerMS),
+            HIWORD(info->wicVerLS),
+            LOWORD(info->wicVerLS));
+    }
+    else {
+        trace_write(ctx,
+            "[ENV]  windowscodecs.dll version=(unavailable)\r\n");
+    }
+}
+

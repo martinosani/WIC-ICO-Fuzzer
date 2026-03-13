@@ -33,6 +33,7 @@
 #include "config.h"
 #include "policy.h"
 
+
 /* =========================================================================
  * Triage stage identifiers
  * ========================================================================= */
@@ -71,14 +72,42 @@ typedef enum _TRIAGE_STAGE {
 /* =========================================================================
  * Trace context
  * ========================================================================= */
+
+typedef enum _HRESULT_CLASSIFICATION {
+    HRCLS_SUCCESS = 0,
+    HRCLS_UNSUPPORTED_EXPECTED,
+    HRCLS_NO_DATA_EXPECTED,
+    HRCLS_PARSER_REJECT,
+    HRCLS_RESOURCE_LIMIT,
+    HRCLS_UNEXPECTED_FAILURE,
+    HRCLS_COUNT
+} HRESULT_CLASSIFICATION;
+
 typedef struct _HARNESS_TRACE_CTX {
     BOOL         enabled;
     HANDLE       hFile;
-    WCHAR        path[HARNESS_TRACE_PATH_MAX];
-    UINT         currentIteration;
-    UINT         currentFrame;
+    WCHAR        path[MAX_PATH];
+    unsigned int currentIteration;
+    unsigned int currentFrame;
     TRIAGE_STAGE lastStage;
+    unsigned int hrClassCounts[HRCLS_COUNT];
 } HARNESS_TRACE_CTX;
+
+typedef struct _HARNESS_RUNTIME_INFO {
+    DWORD windowsMajor;
+    DWORD windowsMinor;
+    DWORD windowsBuild;
+
+    WORD  processMachine;
+    WORD  nativeMachine;
+
+    BOOL  isWow64;
+    BOOL  hasFactory2;
+
+    DWORD wicVerMS;
+    DWORD wicVerLS;
+    BOOL  hasWindowsCodecsVersion;
+} HARNESS_RUNTIME_INFO;
 
 /* =========================================================================
  * Function declarations
@@ -101,6 +130,9 @@ void trace_container_format(HARNESS_TRACE_CTX* ctx, HRESULT hr,
 void trace_frame_count(HARNESS_TRACE_CTX* ctx, HRESULT hr,
                        UINT frameCount, UINT cappedCount);
 void trace_frame_begin(HARNESS_TRACE_CTX* ctx, UINT frameIndex);
+
+void trace_runtime_info(HARNESS_TRACE_CTX* ctx,
+    const HARNESS_RUNTIME_INFO* info);
 
 /*
  * trace_frame_budget
@@ -141,5 +173,8 @@ void trace_seh_exception(HARNESS_TRACE_CTX* ctx, DWORD exceptionCode,
 void trace_write_direct(HARNESS_TRACE_CTX* ctx, const char* msg);
 
 const char* trace_stage_string(TRIAGE_STAGE stage);
+
+
+
 
 #endif /* HARNESS_TRACE_H */
